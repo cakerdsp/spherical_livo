@@ -30,6 +30,8 @@ struct Feature
   int camera_id = 0;
   std::shared_ptr<spherical::Image> sphere_image;
   std::vector<V3D> rays;
+  std::vector<double> ray_pitch;
+  std::vector<spherical::Basis> ray_basis;
   FeatureType type_;     //!< Type can be corner or edgelet.
   cv::Mat img_;          //!< Image associated with the patch feature
   Vector2d px_;          //!< Coordinates in pixels on pyramid level 0.

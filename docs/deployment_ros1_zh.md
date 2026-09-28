@@ -176,7 +176,7 @@ RViz 默认开启，固定坐标系 `camera_init`，共用 `rviz_cfg/spherical_l
 
 绿色／蓝色中心标记沿用原版跟踪误差显示，黄色小点是球面采样投影。完成 IMU 初始化、LIO 有可用点后才进入视觉处理；初始化阶段没有独立可视化节点代发图像。着色与图像发布直接在 LIVMapper 内完成。
 
-终端使用原版蓝色加粗边框 LIO/VIO 计时表，每个完成事件打印。LIO 点到平面匹配、视觉逐 patch 残差、逐点着色使用 4 线程 OpenMP；状态、组帧和地图更新顺序执行。
+终端使用原版蓝色加粗边框 LIO/VIO 计时表，每个完成事件打印。LIO 点到平面匹配保持原有 4 线程；视觉 patch 准备／残差／参考构造、逐点着色使用自动至多 8 线程 OpenMP；状态、组帧和地图更新顺序执行。
 
 ```bash
 # 不开 RViz
@@ -192,3 +192,12 @@ rviz -d $(rospack find spherical_livo)/rviz_cfg/spherical_livo.rviz
 节点显示 `Sensor subscribers ready` 后等待各已配置相机、雷达、IMU 消息。同步沿原版／cake_slam：完整图像组 → 雷达／IMU 覆盖图像时间 → LIO → VIO。`common/num_cameras` 必须与实际播放话题一致；缺一路会等待或丢弃不完整组。私有两路沿 cake_slam 使用 40 ms 配对容差，公开预设 1 ms；组内图像按最大校正时间处理，这不是连续时间模型。
 
 重复播放同一包先重启节点。默认参数是未回放的工程起点；恢复主干并不构成编译成功或轨迹正确的保证。完整来源与变动见 restoration_scope.md。
+
+
+## 视觉性能更新
+
+保持现有 YAML 不变，拉取并以 Release 重新编译、source 后使用原 launch。
+终端每路表现在标明 Camera ID、Accepted Patches、Visual Workers，并单列 preparePatches。
+新增 Multi-camera VIO Time 的 All Cameras (secs) 用来检查两路合计是否达到 0.030 s；Group Total (secs) 还包含着色和图像发布。Current Total Time 已包含原表遗漏的图像准备与绘图，不能只比较内部 computeJacobian 一行。
+
+本次没有降低 patch_samples、max_patches 或金字塔层数，没有跳过相机／帧来满足时间指标；没有本机性能测量结果。采样、准备、参考构造使用自动至多 8 个工作线程，沿用 cake_slam 的结果分槽与顺序提交方法，状态和相机仍顺序更新。IMU、LIO、同步逻辑与 YAML 未修改。

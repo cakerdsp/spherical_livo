@@ -24,7 +24,12 @@ which is included as part of this source code package.
 struct SphericalWarp
 {
   std::vector<V3D> world;
-  std::vector<M3D> precision;
+  std::vector<spherical::SamplingKernel> kernels;
+  std::vector<spherical::Sample> current;
+  M3D pose_R = M3D::Identity();
+  V3D pose_t = V3D::Zero();
+  double cover = 0;
+  bool ready = false;
   std::vector<float> reference;
 };
 
@@ -110,7 +115,21 @@ public:
   SubSparseMap *visual_submap = nullptr;
   std::vector<std::vector<V3D>> rays_with_sample_points;
 
-  double compute_jacobian_time, update_ekf_time;
+  double compute_jacobian_time = 0, update_ekf_time = 0, prepare_patches_time = 0;
+  int visual_threads = 1;
+  struct DepthRay {
+    V3D ray, bearing;
+    double range, variance;
+    int next;
+  };
+  // Unit-sphere cells are an exact candidate index, not downsampled depth.
+  static constexpr int depth_side = 21;
+  std::array<int,depth_side*depth_side*depth_side> depth_heads;
+  std::vector<DepthRay> depth_rays;
+  V3D depth_origin = V3D::Zero(), depth_pose_t = V3D::Zero();
+  M3D depth_pose_R = M3D::Identity();
+  bool depth_index_valid = false;
+  void updateDepthIndex();
   double ave_total = 0;
   // double ave_build_residual_time = 0;
   // double ave_ekf_time = 0;
@@ -141,6 +160,7 @@ public:
     std::shared_ptr<SphericalCamera> camera;
     M3D Rcl = M3D::Identity(); V3D Pcl = V3D::Zero();
     cv::Mat img_rgb, img_cp;
+    M3D color_Rcw = M3D::Identity(); V3D color_Pcw = V3D::Zero();
     double inv_exposure = 1.0;
   };
   std::vector<CameraView> cameras_;
@@ -151,7 +171,7 @@ public:
   const std::vector<pointWithVar>* current_points = nullptr;
   const unordered_map<VOXEL_LOCATION,VoxelOctoTree*>* current_planes = nullptr;
   void activateCamera(int id);
-  bool getColorFromCamera(int id,const V3D& world,const StatesGroup& pose,V3F& color,double blind);
+  bool getColorFromCamera(int id,const V3D& world,V3F& color,double blind);
   bool refreshPlane(VisualPoint& pt);
   bool buildSphericalReference(Feature& feature);
   bool prepareSphericalWarp(const Feature& feature,int level,SphericalWarp& warp) const;

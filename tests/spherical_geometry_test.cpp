@@ -68,3 +68,47 @@ TEST(SphericalGeometry,ExposureEliminationRetainsOnlyIdentifiableInformation){
   Eigen::Vector3d j(1,2,3);const Eigen::Matrix2d h=(Eigen::Vector2d(1,1)*Eigen::Vector2d(1,1).transpose())*j.squaredNorm();
   EXPECT_NEAR(h(0,0)-h(0,1)*h(1,0)/h(1,1),0,1e-12);
 }
+
+
+TEST(SphericalGeometry,NativeProjectionSeedsStillRequireSphericalContainment){
+  for(auto type:{CameraModel::Type::Pinhole,CameraModel::Type::KannalaBrandt,CameraModel::Type::Mei}) {
+    auto model=pinhole();model.type=type;
+    if(type==CameraModel::Type::KannalaBrandt) model.fx=model.fy=45;
+    if(type==CameraModel::Type::Mei) model.xi=3.177956;
+    model.distortion[0]=-0.015;model.distortion[1]=0.006;
+    RayAtlas atlas(model);int checked=0;
+    for(int y=30;y<100;y+=17) for(int x=25;x<140;x+=21) {
+      const Vec b=model.ray(x+0.2,y+0.3);
+      if(b.squaredNorm()<0.9) continue;
+      Eigen::Vector2d seed,located;double pitch;
+      ASSERT_TRUE(model.project(b,seed));
+      EXPECT_NEAR(seed.x(),x+0.2,1e-6);EXPECT_NEAR(seed.y(),y+0.3,1e-6);
+      ASSERT_TRUE(atlas.locate(b,located,pitch));
+      EXPECT_LT((located-seed).norm(),0.1);EXPECT_GT(pitch,0);++checked;
+    }
+    EXPECT_GT(checked,0);
+  }
+}
+
+TEST(SphericalGeometry,FastKernelChecksTheSameFinitePlanePixels){
+  auto atlas=std::make_shared<RayAtlas>(pinhole());cv::Mat raw(128,160,CV_8UC1);
+  for(int y=0;y<128;++y) for(int x=0;x<160;++x) raw.at<uchar>(y,x)=40+(3*x+2*y)%150;
+  Image image(atlas,raw);const Vec b=Vec(0.03,-0.02,1).normalized();
+  const Mat a=precision(b,(Eigen::Vector2d(0.04*0.04,0.025*0.025)).asDiagonal());
+  const auto kernel=SamplingKernel::fromMatrix(a);
+  Sample full;ASSERT_TRUE(image.sample(b,a,full));
+  const Vec normal=Vec(0.2,-0.1,1).normalized();const double height=4;
+  const Vec center=b*(height/normal.dot(b));
+  for(double radius:{0.02,0.12,2.0}) {
+    bool expected=true;
+    for(const auto& weight:full.weights) {
+      const Vec ray=atlas->ray(weight.first%160,weight.first/160);
+      const Vec surface=ray*(height/normal.dot(ray));
+      if((surface-center).norm()>radius) expected=false;
+    }
+    PlaneSupport support{normal,center,height,radius};Sample fast;
+    EXPECT_EQ(image.sample(b,kernel,fast,true,&support),expected);
+    if(expected) { EXPECT_NEAR(full.value,fast.value,1e-12);EXPECT_LT((full.gradient-fast.gradient).norm(),1e-10); }
+    EXPECT_TRUE(fast.weights.empty());
+  }
+}

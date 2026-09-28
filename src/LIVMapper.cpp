@@ -393,6 +393,7 @@ void LIVMapper::handleVIO()
     vio_manager->plot_flag = false;
   }
 
+  const double group_start=omp_get_wtime();
   const auto& group=LidarMeasures.measures.back().multi_cam_frame;
   for(int id=0; id<num_cameras; ++id)
   {
@@ -406,11 +407,13 @@ void LIVMapper::handleVIO()
       _state.cov(6,6)=inv_expo_cov;
     }
     state_propagat=_state;
-    cv::Mat image=group.images[id].clone();
+    cv::Mat image=group.images[id];
     vio_manager->processFrame(image,_pv_list,voxelmap_manager->voxel_map_,
       LidarMeasures.last_lio_update_time-_first_lidar_time);
     vio_manager->cameras_[id].inv_exposure=_state.inv_expo_time;
   }
+
+  const double group_visual_end=omp_get_wtime();
 
   if (imu_prop_enable) 
   {
@@ -434,6 +437,19 @@ void LIVMapper::handleVIO()
 
   publish_frame_world(pubLaserCloudFullRes, vio_manager);
   publish_img_rgb(pubImage, vio_manager);
+  const double group_end=omp_get_wtime();
+  static int group_count=0;static double group_average=0;
+  ++group_count;group_average+=(group_end-group_start-group_average)/group_count;
+  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+  printf("\033[1;34m|                    Multi-camera VIO Time                    |\033[0m\n");
+  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+  printf("\033[1;32m| %-29s | %-27d |\033[0m\n", "Sequential Cameras", num_cameras);
+  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "All Cameras (secs)", group_visual_end-group_start);
+  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "RGB / Image Publish (secs)", group_end-group_visual_end);
+  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Group Total (secs)", group_end-group_start);
+  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Group Average (secs)", group_average);
+  printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+
   euler_cur=RotMtoEuler(_state.rot_end);
   geoQuat=tf::createQuaternionMsgFromRollPitchYaw(euler_cur(0),euler_cur(1),euler_cur(2));
   publish_odometry(pubOdomAftMapped);
@@ -1477,8 +1493,12 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes, 
       pub_num = 1;
       size_t size = pcl_wait_pub->points.size();
       laserCloudWorldRGB->reserve(size);
+      for(auto& view:vio_manager->cameras_) {
+        view.color_Rcw=view.Rcl*vio_manager->Rli*_state.rot_end.transpose();
+        view.color_Pcw=-view.color_Rcw*_state.pos_end+view.Rcl*vio_manager->Pli+view.Pcl;
+      }
       laserCloudWorldRGB->resize(size);
-      #pragma omp parallel for num_threads(4)
+      #pragma omp parallel for num_threads(vio_manager->visual_threads) schedule(static)
       for (long i=0; i<static_cast<long>(size); ++i)
       {
         auto& rgb=laserCloudWorldRGB->points[i];
@@ -1487,7 +1507,7 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes, 
         const V3D pw(p.x,p.y,p.z);
         for(int id=0;id<num_cameras;++id) {
           V3F pixel;
-          if(vio_manager->getColorFromCamera(id,pw,_state,pixel,blind_rgb_points)) {
+          if(vio_manager->getColorFromCamera(id,pw,pixel,blind_rgb_points)) {
             rgb.r=pixel[2]; rgb.g=pixel[1]; rgb.b=pixel[0]; break;
           }
         }

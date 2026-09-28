@@ -21,7 +21,7 @@ Eigen::Matrix<double, 3, 6> bearingJacobian(const Mat& Rwi, const Vec& pwi,
                                           const Mat& Rci, const Vec& tci,
                                           const Vec& pw);
 
-// Calibration is used only to build the original sensor's ray LUT.
+// Calibration builds the ray LUT and seeds its cell lookup.
 // Runtime photometric sampling has no virtual camera or pixel warp.
 struct CameraModel {
   enum class Type { Pinhole, KannalaBrandt, Mei };
@@ -30,6 +30,7 @@ struct CameraModel {
   double fx = 0, fy = 0, cx = 0, cy = 0, xi = 0;
   std::array<double, 5> distortion{};
   Vec ray(double u, double v) const;
+  bool project(const Vec& bearing, Eigen::Vector2d& pixel) const;
   void validate() const;
 };
 
@@ -48,6 +49,8 @@ class RayAtlas {
   struct Node { int seed, left = -1, right = -1, axis = 0; };
   int build(std::vector<int>& ids, int begin, int end, int depth);
   void nearest(int node, const Vec& b, int& best, double& distance) const;
+  CameraModel model_;
+  bool locateCell(const Vec& b,int x,int y,Eigen::Vector2d& pixel) const;
   int width_, height_, root_ = -1;
   std::vector<Eigen::Vector3f> rays_;
   std::vector<float> areas_;
@@ -61,18 +64,37 @@ struct Sample {
   std::vector<std::pair<int, double>> weights;
 };
 
+// Prepared once per sample/linearization, not eigen-decomposed per iteration.
+struct SamplingKernel {
+  Mat matrix = Mat::Identity();
+  double radius = 0; // maximum Euclidean radius of the 3-D kernel support
+  static SamplingKernel fromMatrix(const Mat& matrix);
+};
+
+// All quantities in the image camera frame. Used only for support validation.
+struct PlaneSupport {
+  Vec normal, center;
+  double height = 0, radius = 0;
+  bool contains(const Vec& ray) const;
+  bool containsKernel(const Vec& bearing,double kernel_radius) const;
+};
+
 class Image {
  public:
-  Image(std::shared_ptr<const RayAtlas> atlas, const cv::Mat& gray);
+  Image(std::shared_ptr<const RayAtlas> atlas, const cv::Mat& gray, bool estimate_noise = true);
   std::shared_ptr<Image> crop(const cv::Rect& roi) const;
   // precision is frozen for a linearization. The compact Wendland kernel has
   // zero value and derivative at its boundary; changing support is continuous.
   bool sample(const Vec& b, const Mat& precision, Sample& result) const;
+  bool sample(const Vec& b, const SamplingKernel& kernel, Sample& result,
+              bool gradient = true, const PlaneSupport* support = nullptr) const;
   bool locate(const Vec& b, Eigen::Vector2d& pixel, double& pitch) const;
   const RayAtlas& atlas() const { return *atlas_; }
   double noise() const { return noise_; }
   cv::Rect bounds() const { return bounds_; }
  private:
+  bool sampleImpl(const Vec& b, const SamplingKernel& kernel, Sample& result,
+                  bool gradient, bool weights, const PlaneSupport* support) const;
   Image() = default;
   std::shared_ptr<const RayAtlas> atlas_;
   cv::Mat gray_;

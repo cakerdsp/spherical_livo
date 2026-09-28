@@ -11,13 +11,32 @@ which is included as part of this source code package.
 */
 
 #include "vio.h"
-#include <Eigen/SVD>
 #include <Eigen/Eigenvalues>
 #include <omp.h>
+#include <exception>
+
+namespace {
+// cake_slam pattern: independent slots, exception capture inside OpenMP,
+// then serial ordered state/map writes. Cameras themselves remain sequential.
+template<class Function> void parallelPatches(int count,int threads,Function&& function)
+{
+  std::vector<std::exception_ptr> failures(count);
+  #pragma omp parallel for num_threads(threads) schedule(dynamic,4) if(count>1)
+  for(int i=0;i<count;++i) {
+    try { function(i); }
+    catch(...) { failures[i]=std::current_exception(); }
+  }
+  for(const auto& failure:failures) if(failure) std::rethrow_exception(failure);
+}
+int depthCell(double coordinate) {
+  return std::max(0,std::min(20,int(std::floor((coordinate+1.0)*10.0))));
+}
+int depthKey(int x,int y,int z) { return (z*21+y)*21+x; }
+}
 
 VIOManager::VIOManager()
 {
-  // downSizeFilter.setLeafSize(0.2, 0.2, 0.2);
+  visual_threads=std::max(1,std::min(8,omp_get_max_threads()));
 }
 
 VIOManager::~VIOManager()
@@ -82,7 +101,7 @@ void VIOManager::initializeVIO()
   scan_value.resize(length);
 
   patch_size_total = sample_count;
-  sphere_template=spherical::capTemplate(sample_count,patch_radius);
+  if(sphere_template.empty()) sphere_template=spherical::capTemplate(sample_count,patch_radius);
   patch_size_half = static_cast<int>(patch_size / 2);
   patch_buffer.resize(patch_size_total);
   warp_len = patch_size_total * patch_pyrimid_level;
@@ -264,46 +283,57 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
   // double t_2, t_3, t_4, t_5;
   // t_2=t_3=t_4=t_5=0;
 
-  for (int i = 0; i < length; i++)
-  {
-    if (grid_num[i] == TYPE_MAP)
-    {
-      // double t_1 = omp_get_wtime();
-
-      VisualPoint *pt = retrieve_voxel_points[i];
-      // visual_sub_map_cur.push_back(pt); // before
-
-      V2D pc(new_frame_->w2c(pt->pos_));
-
-      // cv::circle(img_cp, cv::Point2f(pc[0], pc[1]), 3, cv::Scalar(0, 0, 255), -1, 8); // Green Sparse Align tracked
-
-      if (total_points >= max_patches || !refreshPlane(*pt)) continue;
-      Feature* ref_ftr=nullptr;
-      if(!pt->getCloseViewObs(new_frame_->pos(),ref_ftr,pc) || !ref_ftr->sphere_image) continue;
-      std::vector<SphericalWarp> warps(patch_pyrimid_level);
-      bool valid=true;
-      for(int level=0;level<patch_pyrimid_level;++level)
-        if(!prepareSphericalWarp(*ref_ftr,level,warps[level]) || !depthConsistent(*pt,warps[level])) { valid=false; break; }
-      if(!valid) continue;
-      float error=0;
-      for(int k=0;k<patch_size_total;++k) {
-        spherical::Sample sample;
-        const V3D bc=new_frame_->w2f(warps[0].world[k]).normalized();
-        if(!sphere_image->sample(bc,warps[0].precision[k],sample)) { valid=false; break; }
-        const double residual=255*state->inv_expo_time*sample.value-ref_ftr->inv_expo_time_*warps[0].reference[k];
-        error+=residual*residual;
-      }
-      if(!valid || error > outlier_threshold*patch_size_total) continue;
-      visual_submap->voxel_points.push_back(pt);
-      visual_submap->references.push_back(ref_ftr);
-      visual_submap->sphere_warps.push_back(std::move(warps));
-      visual_submap->propa_errors.push_back(error);
-      visual_submap->errors.push_back(error);
-      visual_submap->search_levels.push_back(0);
-      visual_submap->inv_expo_list.push_back(ref_ftr->inv_expo_time_);
-      ++total_points;
-      // t_5 += omp_get_wtime() - t_1;
+  std::vector<int> candidate_cells;
+  for(int i=0;i<length;++i) if(grid_num[i]==TYPE_MAP) candidate_cells.push_back(i);
+  struct Candidate {
+    VisualPoint* point = nullptr;
+    Feature* reference = nullptr;
+    std::vector<SphericalWarp> warps;
+    float error = 0;
+    bool accepted = false;
+  };
+  // Batches stop at the original accepted-patch budget, in original grid order.
+  // Do not prepare all map points only to discard most after joining.
+  for(size_t begin=0;begin<candidate_cells.size() && total_points<max_patches;) {
+    const int count=std::min<size_t>(max_patches-total_points,candidate_cells.size()-begin);
+    std::vector<Candidate> candidates(count);
+    for(int j=0;j<count;++j) {
+      auto& candidate=candidates[j];
+      auto* point=retrieve_voxel_points[candidate_cells[begin+j]];
+      // Plane refresh writes shared landmarks; keep it outside parallel work.
+      if(!point || !refreshPlane(*point)) continue;
+      Feature* reference=nullptr;
+      if(!point->getCloseViewObs(new_frame_->pos(),reference,new_frame_->w2c(point->pos_)) || !reference->sphere_image) continue;
+      candidate.point=point;candidate.reference=reference;
     }
+    parallelPatches(count,visual_threads,[&](int j) {
+      auto& candidate=candidates[j];
+      if(!candidate.point) return;
+      candidate.warps.resize(patch_pyrimid_level);
+      // Coarsest first rejects incomplete support before preparing finer levels.
+      for(int level=patch_pyrimid_level-1;level>=0;--level)
+        if(!prepareSphericalWarp(*candidate.reference,level,candidate.warps[level]) ||
+           !depthConsistent(*candidate.point,candidate.warps[level])) return;
+      const auto& fine=candidate.warps[0];
+      for(int k=0;k<patch_size_total;++k) {
+        const double residual=255*state->inv_expo_time*fine.current[k].value-
+          candidate.reference->inv_expo_time_*fine.reference[k];
+        candidate.error+=residual*residual;
+      }
+      candidate.accepted=candidate.error<=outlier_threshold*patch_size_total;
+    });
+    for(auto& candidate:candidates) {
+      if(!candidate.accepted) continue;
+      visual_submap->voxel_points.push_back(candidate.point);
+      visual_submap->references.push_back(candidate.reference);
+      visual_submap->sphere_warps.push_back(std::move(candidate.warps));
+      visual_submap->propa_errors.push_back(candidate.error);
+      visual_submap->errors.push_back(candidate.error);
+      visual_submap->search_levels.push_back(0);
+      visual_submap->inv_expo_list.push_back(candidate.reference->inv_expo_time_);
+      ++total_points;
+    }
+    begin+=count;
   }
   total_points = visual_submap->voxel_points.size();
 
@@ -316,7 +346,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
 void VIOManager::computeJacobianAndUpdateEKF(cv::Mat img)
 {
-  compute_jacobian_time = update_ekf_time = 0;
+  compute_jacobian_time = update_ekf_time = prepare_patches_time = 0;
   G.setZero();
   if (total_points == 0) return;
   
@@ -386,45 +416,31 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
   // t0 = omp_get_wtime();
 
   int add = 0;
-  for (int i = 0; i < length; i++)
-  {
-    if (add + total_points >= max_patches) break;
-    if (grid_num[i] == TYPE_POINTCLOUD) // && (scan_value[i]>=50))
-    {
-      pointWithVar pt_var = append_voxel_points[i];
-      V3D pt = pt_var.point_w;
-
-      V3D norm_vec(new_frame_->T_f_w_.rotationMatrix() * pt_var.normal);
-      V3D dir(new_frame_->T_f_w_ * pt);
-      dir.normalize();
-      double cos_theta = dir.dot(norm_vec);
-      // if(std::fabs(cos_theta)<0.34) continue; // 70 degree
-      V2D pc(new_frame_->w2c(pt));
-
-      float *patch = new float[patch_size_total];
-
-      VisualPoint *pt_new = new VisualPoint(pt);
-
-      Vector3d f = cam->cam2world(pc);
-      Feature *ftr_new = new Feature(pt_new, patch, pc, f, new_frame_->T_f_w_, 0);
-      ftr_new->img_ = img;
-      ftr_new->id_ = new_frame_->id_;
-      ftr_new->inv_expo_time_ = state->inv_expo_time;
-
-      pt_new->addFrameRef(ftr_new);
-      pt_new->covariance_ = pt_var.var;
-      pt_new->is_normal_initialized_ = true;
-
-      if (cos_theta < 0) { pt_new->normal_ = -pt_var.normal; }
-      else { pt_new->normal_ = pt_var.normal; }
-      
-      pt_new->previous_normal_ = pt_new->normal_;
-
-      if(!refreshPlane(*pt_new) || !buildSphericalReference(*ftr_new)) { delete pt_new; continue; }
-      insertPointIntoVoxelMap(pt_new);
-      add += 1;
-      // map_cur_frame.push_back(pt_new);
-    }
+  std::vector<int> cells;
+  for(int i=0;i<length;++i) if(grid_num[i]==TYPE_POINTCLOUD) cells.push_back(i);
+  for(size_t begin=0;begin<cells.size() && add+total_points<max_patches;) {
+    const int count=std::min<size_t>(max_patches-total_points-add,cells.size()-begin);
+    std::vector<std::unique_ptr<VisualPoint>> points(count);
+    parallelPatches(count,visual_threads,[&](int j) {
+      const auto& pt_var=append_voxel_points[cells[begin+j]];
+      auto point=std::make_unique<VisualPoint>(pt_var.point_w);
+      point->covariance_=pt_var.var;point->is_normal_initialized_=true;
+      const V3D pc3=new_frame_->w2f(pt_var.point_w);
+      point->normal_=pt_var.normal;
+      if(pc3.dot(new_frame_->T_f_w_.rotationMatrix()*pt_var.normal)<0) point->normal_=-point->normal_;
+      point->previous_normal_=point->normal_;
+      if(!refreshPlane(*point)) return; // exclusively owned candidate
+      const V2D pc=new_frame_->w2c(pt_var.point_w);
+      auto patch=std::make_unique<float[]>(patch_size_total);
+      auto feature=std::make_unique<Feature>(point.get(),patch.get(),pc,cam->cam2world(pc),new_frame_->T_f_w_,0);
+      patch.release();
+      feature->img_=img;feature->id_=new_frame_->id_;feature->inv_expo_time_=state->inv_expo_time;
+      if(!buildSphericalReference(*feature)) return;
+      point->addFrameRef(feature.get());feature.release();
+      points[j]=std::move(point);
+    });
+    for(auto& point:points) if(point) { insertPointIntoVoxelMap(point.get());point.release();++add; }
+    begin+=count;
   }
 
   // double t_b2 = omp_get_wtime() - t0;
@@ -437,65 +453,42 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
 
 void VIOManager::updateVisualMapPoints(cv::Mat img)
 {
-  if (total_points == 0) return;
-
-  int update_num = 0;
-  SE3 pose_cur = new_frame_->T_f_w_;
-  for (int i = 0; i < total_points; i++)
-  {
-    VisualPoint *pt = visual_submap->voxel_points[i];
-    if (pt == nullptr) continue;
-    if (pt->is_converged_)
-    { 
-      pt->deleteNonRefPatchFeatures();
-      continue;
+  if(total_points==0) return;
+  struct PendingReference { int index; V2D pixel; std::unique_ptr<Feature> feature; };
+  std::vector<PendingReference> pending;
+  const SE3 pose_cur=new_frame_->T_f_w_;
+  for(int i=0;i<total_points;++i) {
+    auto* pt=visual_submap->voxel_points[i];
+    if(!pt) continue;
+    if(pt->is_converged_) { pt->deleteNonRefPatchFeatures();continue; }
+    const V2D pc=new_frame_->w2c(pt->pos_);
+    auto* previous=pt->obs_.front();
+    const SE3 delta_pose=previous->T_f_w_*pose_cur.inverse();
+    const double trace=delta_pose.rotationMatrix().trace();
+    const double angle=trace>3.0-1e-6 ? 0.0 : std::acos(std::max(-1.0,std::min(1.0,0.5*(trace-1))));
+    const bool add=delta_pose.translation().norm()>0.5 || angle>0.3 ||
+      previous->camera_id!=active_camera || (pc-previous->px_).norm()>40;
+    if(pt->obs_.size()>=30) {
+      Feature* remove=nullptr;pt->findMinScoreFeature(new_frame_->pos(),remove);pt->deleteFeatureRef(remove);
     }
-
-    V2D pc(new_frame_->w2c(pt->pos_));
-    bool add_flag = false;
-    
-    float *patch_temp = new float[patch_size_total];
-
-    // TODO: condition: distance and view_angle
-    // Step 1: time
-    Feature *last_feature = pt->obs_.front();
-    // if(new_frame_->id_ >= last_feature->id_ + 10) add_flag = true; // 10
-
-    // Step 2: delta_pose
-    SE3 pose_ref = last_feature->T_f_w_;
-    SE3 delta_pose = pose_ref * pose_cur.inverse();
-    double delta_p = delta_pose.translation().norm();
-    double delta_theta = (delta_pose.rotationMatrix().trace() > 3.0 - 1e-6) ? 0.0 : std::acos(0.5 * (delta_pose.rotationMatrix().trace() - 1));
-    if (delta_p > 0.5 || delta_theta > 0.3) add_flag = true; // 0.5 || 0.3
-
-    // Step 3: pixel distance
-    Vector2d last_px = last_feature->px_;
-    double pixel_dist = (pc - last_px).norm();
-    if (last_feature->camera_id != active_camera || pixel_dist > 40) add_flag = true;
-
-    // Maintain the size of 3D point observation features.
-    if (pt->obs_.size() >= 30)
-    {
-      Feature *ref_ftr;
-      pt->findMinScoreFeature(new_frame_->pos(), ref_ftr);
-      pt->deleteFeatureRef(ref_ftr);
-      // cout<<"pt->obs_.size() exceed 20 !!!!!!"<<endl;
-    }
-    if (add_flag)
-    {
-      update_num += 1;
-      update_flag[i] = 1;
-      Vector3d f = cam->cam2world(pc);
-      Feature *ftr_new = new Feature(pt, patch_temp, pc, f, new_frame_->T_f_w_, visual_submap->search_levels[i]);
-      ftr_new->img_ = img;
-      ftr_new->id_ = new_frame_->id_;
-      ftr_new->inv_expo_time_ = state->inv_expo_time;
-      if(!buildSphericalReference(*ftr_new)) { delete ftr_new; continue; }
-      pt->addFrameRef(ftr_new);
-    }
-    else delete[] patch_temp;
+    if(add) pending.push_back({i,pc,nullptr});
   }
-  printf("[ VIO ] Update %d points in visual submap\n", update_num);
+  parallelPatches(int(pending.size()),visual_threads,[&](int j) {
+    auto& item=pending[j];
+    auto* pt=visual_submap->voxel_points[item.index];
+    auto patch=std::make_unique<float[]>(patch_size_total);
+    auto feature=std::make_unique<Feature>(pt,patch.get(),item.pixel,cam->cam2world(item.pixel),
+      new_frame_->T_f_w_,visual_submap->search_levels[item.index]);
+    patch.release();
+    feature->img_=img;feature->id_=new_frame_->id_;feature->inv_expo_time_=state->inv_expo_time;
+    if(buildSphericalReference(*feature)) item.feature=std::move(feature);
+  });
+  int update_num=0;
+  for(auto& item:pending) if(item.feature) {
+    visual_submap->voxel_points[item.index]->addFrameRef(item.feature.get());item.feature.release();
+    update_flag[item.index]=1;++update_num;
+  }
+  printf("[ VIO ] Update %d points in visual submap\n",update_num);
 }
 
 void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
@@ -576,13 +569,22 @@ void VIOManager::updateState(cv::Mat img, int level)
 {
   if (total_points == 0) return;
   StatesGroup old_state = (*state);
+  const double prepare_start=omp_get_wtime();
   updateFrameState(*state);
-  std::vector<SphericalWarp> prepared(total_points);
-  for(int i=0;i<total_points;++i) {
-    if(!prepareSphericalWarp(*visual_submap->references[i],level,prepared[i]) ||
-       !depthConsistent(*visual_submap->voxel_points[i],prepared[i])) return;
-  }
-  for(int i=0;i<total_points;++i) visual_submap->sphere_warps[i][level]=std::move(prepared[i]);
+  std::vector<unsigned char> valid(total_points,0);
+  parallelPatches(total_points,visual_threads,[&](int i) {
+    auto& warp=visual_submap->sphere_warps[i][level];
+    // Retrieval and the first coarse iteration have exactly the same pose.
+    // Reuse samples/Jacobian inputs only with an exact pose match; any update
+    // requires freshly prepared bandwidth and current-image samples.
+    if(warp.ready && (warp.pose_R-Rcw).squaredNorm()==0 && (warp.pose_t-Pcw).squaredNorm()==0) {
+      valid[i]=1;return;
+    }
+    valid[i]=prepareSphericalWarp(*visual_submap->references[i],level,warp) &&
+             depthConsistent(*visual_submap->voxel_points[i],warp);
+  });
+  prepare_patches_time+=omp_get_wtime()-prepare_start;
+  for(unsigned char ready:valid) if(!ready) return;
 
   VectorXd z;
   MatrixXd H_sub;
@@ -594,6 +596,8 @@ void VIOManager::updateState(cv::Mat img, int level)
   z.setZero();
   H_sub.resize(H_DIM, 7);
   H_sub.setZero();
+  struct PatchResult { float error=0; int measurements=0; bool invalid=false; };
+  std::vector<PatchResult> results(total_points);
 
   for (int iteration = 0; iteration < max_iterations; iteration++)
   {
@@ -609,27 +613,39 @@ void VIOManager::updateState(cv::Mat img, int level)
     int n_meas = 0;
     int invalid=0;
     H_sub.setZero(); z.setZero();
-    #pragma omp parallel for num_threads(4) reduction(+:error,n_meas,invalid)
-    for(int i=0;i<total_points;++i)
+    parallelPatches(total_points,visual_threads,[&](int i)
     {
+      auto& result=results[i];result=PatchResult{};
       const auto& warp=visual_submap->sphere_warps[i][level];
       const double inv_ref_expo=visual_submap->inv_expo_list[i];
-      float patch_error=0;
+      spherical::Sample sampled;
       for(int k=0;k<patch_size_total;++k) {
-        const V3D pc=Rcw*warp.world[k]+Pcw;
-        spherical::Sample sample;
-        if(pc.squaredNorm()<1e-12 || !sphere_image->sample(pc.normalized(),warp.precision[k],sample)) { ++invalid; break; }
-        const double cur_value=255*sample.value;
+        const V3D pi=Rwi.transpose()*(warp.world[k]-Pwi),pc=Rci*pi+Pci;
+        const double range=pc.norm();
+        if(range<1e-6) { result.invalid=true;break; }
+        const spherical::Sample* sample=&warp.current[k];
+        if(iteration!=0) {
+          if(!sphere_image->sample(pc/range,warp.kernels[k],sampled)) { result.invalid=true;break; }
+          sample=&sampled;
+        }
+        const double cur_value=255*sample->value;
         const double res=state->inv_expo_time*cur_value-inv_ref_expo*warp.reference[k];
         const int row=i*patch_size_total+k;
         z(row)=res;
-        H_sub.block<1,6>(row,0)=255*state->inv_expo_time*sample.gradient.transpose()*
-          spherical::bearingJacobian(Rwi,Pwi,Rci,Pci,warp.world[k]);
+        // sample.gradient is already tangent to pc/range. Reuse pi/range and
+        // Rwi/Rci instead of normalizing and transforming the same point twice.
+        const Eigen::RowVector3d j=(255*state->inv_expo_time/range)*sample->gradient.transpose()*Rci;
+        H_sub.block<1,3>(row,0)=j*spherical::skew(pi);
+        H_sub.block<1,3>(row,3)=-j*Rwi.transpose();
         if(exposure_estimate_en) H_sub(row,6)=cur_value;
-        patch_error+=res*res; ++n_meas;
+        result.error+=res*res;++result.measurements;
       }
-      visual_submap->errors[i]=patch_error;
-      error+=patch_error;
+    });
+    // Fixed summation order, as in cake_slam; no worker writes shared state.
+    for(int i=0;i<total_points;++i) {
+      visual_submap->errors[i]=results[i].error;
+      error+=results[i].error;n_meas+=results[i].measurements;
+      invalid+=results[i].invalid;
     }
     // Keep the same support during an iteration; losing samples is not an
     // improvement in photometric cost.
@@ -698,6 +714,7 @@ void VIOManager::updateFrameState(StatesGroup state)
   Rcw = Rci * Rwi.transpose();
   Pcw = -Rci * Rwi.transpose() * Pwi + Pci;
   new_frame_->T_f_w_ = SE3(Rcw, Pcw);
+  updateDepthIndex();
 }
 
 void VIOManager::plotTrackedPoints()
@@ -759,26 +776,28 @@ V3F VIOManager::getInterpolatedPixel(cv::Mat img, V2D pc)
   const float w_ref_tr = subpix_u_ref * (1.0 - subpix_v_ref);
   const float w_ref_bl = (1.0 - subpix_u_ref) * subpix_v_ref;
   const float w_ref_br = subpix_u_ref * subpix_v_ref;
-  uint8_t *img_ptr = (uint8_t *)img.data + ((v_ref_i)*width + (u_ref_i)) * 3;
-  float B = w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[0 + 3] + w_ref_bl * img_ptr[width * 3] + w_ref_br * img_ptr[width * 3 + 0 + 3];
-  float G = w_ref_tl * img_ptr[1] + w_ref_tr * img_ptr[1 + 3] + w_ref_bl * img_ptr[1 + width * 3] + w_ref_br * img_ptr[width * 3 + 1 + 3];
-  float R = w_ref_tl * img_ptr[2] + w_ref_tr * img_ptr[2 + 3] + w_ref_bl * img_ptr[2 + width * 3] + w_ref_br * img_ptr[width * 3 + 2 + 3];
+  const size_t stride=img.step;
+  const uint8_t *img_ptr = img.ptr<uint8_t>(v_ref_i) + u_ref_i*3;
+  float B = w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[0 + 3] + w_ref_bl * img_ptr[stride] + w_ref_br * img_ptr[stride + 0 + 3];
+  float G = w_ref_tl * img_ptr[1] + w_ref_tr * img_ptr[1 + 3] + w_ref_bl * img_ptr[1 + stride] + w_ref_br * img_ptr[stride + 1 + 3];
+  float R = w_ref_tl * img_ptr[2] + w_ref_tr * img_ptr[2 + 3] + w_ref_bl * img_ptr[2 + stride] + w_ref_br * img_ptr[stride + 2 + 3];
   V3F pixel(B, G, R);
   return pixel;
 }
 
 void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)
 {
+  const double frame_start=omp_get_wtime();
   if(img.empty() || width!=img.cols || height!=img.rows)
     throw std::runtime_error("raw image dimensions differ from camera calibration");
-  current_points=&pg; current_planes=&feat_map;
-  img_rgb = img.clone();
+  current_points=&pg; current_planes=&feat_map; depth_index_valid=false;
+  img_rgb = img;
   img_cp = img.clone();
   // img_test = img.clone();
 
   if (img.channels() == 3) cv::cvtColor(img, img, CV_BGR2GRAY);
 
-  sphere_image=std::make_shared<spherical::Image>(cameras_[active_camera].camera->atlas,img);
+  sphere_image=std::make_shared<spherical::Image>(cameras_[active_camera].camera->atlas,img,false);
   new_frame_.reset(new Frame(cam, img));
   updateFrameState(*state);
   
@@ -814,7 +833,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   cameras_[active_camera].img_cp=img_cp;
 
   frame_count++;
-  ave_total = ave_total * (frame_count - 1) / frame_count + (t7 - t1 - (t5 - t4)) / frame_count;
+  ave_total = ave_total * (frame_count - 1) / frame_count + (t7 - frame_start) / frame_count;
 
   // printf("[ VIO ] feat_map.size(): %zu\n", feat_map.size());
   // printf("\033[1;32m[ VIO time ]: current frame: retrieveFromVisualSparseMap time: %.6lf secs.\033[0m\n", t2 - t1);
@@ -834,18 +853,24 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   printf("\033[1;34m|                         VIO Time                            |\033[0m\n");
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
   printf("\033[1;34m| %-29s | %-27zu |\033[0m\n", "Sparse Map Size", feat_map.size());
+  printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Camera ID", active_camera);
+  printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Accepted Patches", total_points);
+  printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Visual Workers", visual_threads);
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
   printf("\033[1;34m| %-29s | %-27s |\033[0m\n", "Algorithm Stage", "Time (secs)");
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
+  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "image / depth index", t1-frame_start);
   printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "retrieveFromVisualSparseMap", t2 - t1);
   printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "computeJacobianAndUpdateEKF", t3 - t2);
+  printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> preparePatches", prepare_patches_time);
   printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> computeJacobian", compute_jacobian_time);
   printf("\033[1;32m| %-27s   | %-27lf |\033[0m\n", "-> updateEKF", update_ekf_time);
   printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "generateVisualMapPoints", t4 - t3);
+  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "draw spherical samples", t5-t4);
   printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "updateVisualMapPoints", t6 - t5);
   printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "updateReferencePatch", t7 - t6);
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Current Total Time", t7 - t1 - (t5 - t4));
+  printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Current Total Time", t7 - frame_start);
   printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Average Total Time", ave_total);
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
 
@@ -855,7 +880,9 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   // origin.y = 20;
   // cv::putText(img_cp, text, origin, cv::FONT_HERSHEY_COMPLEX, 0.6, cv::Scalar(255, 255, 255), 1, 8, 0);
   // cv::imwrite("/home/chunran/Desktop/raycasting/" + std::to_string(new_frame_->id_) + ".png", img_cp);
-}// Native spherical geometry integrated into the upstream VIOManager.
+}
+
+// Native spherical geometry integrated into the upstream VIOManager.
 // The shared VisualPoint/Feature map, selection, reference lifecycle and IEKF
 // remain in vio.cpp; this replaces planar patch construction and affine warping.
 void VIOManager::activateCamera(int id)
@@ -869,13 +896,11 @@ void VIOManager::activateCamera(int id)
   initializeVIO();
 }
 
-bool VIOManager::getColorFromCamera(int id,const V3D& world,const StatesGroup& pose,V3F& color,double blind)
+bool VIOManager::getColorFromCamera(int id,const V3D& world,V3F& color,double blind)
 {
   const auto& view=cameras_.at(id);
   if(view.img_rgb.empty()) return false;
-  const M3D rci=view.Rcl*Rli;
-  const V3D pci=view.Rcl*Pli+view.Pcl;
-  const V3D pc=rci*pose.rot_end.transpose()*(world-pose.pos_end)+pci;
+  const V3D pc=view.color_Rcw*world+view.color_Pcw;
   if(pc.norm()<=blind) return false;
   const V2D uv=view.camera->world2cam(pc);
   if(!view.camera->isInFrame(uv.cast<int>(),3)) return false;
@@ -930,7 +955,15 @@ bool VIOManager::buildSphericalReference(Feature& feature)
   if(pc.squaredNorm()<1e-12) return false;
   const M3D rotation=Eigen::Quaterniond::FromTwoVectors(V3D::UnitZ(),pc.normalized()).toRotationMatrix();
   feature.rays.clear();
-  for(const auto& b:sphere_template) feature.rays.push_back(rotation*b);
+  feature.ray_pitch.clear();feature.ray_basis.clear();
+  feature.rays.reserve(sample_count);feature.ray_pitch.reserve(sample_count);feature.ray_basis.reserve(sample_count);
+  for(const auto& node:sphere_template) {
+    const V3D b=rotation*node;
+    V2D uv;double pitch;
+    if(!sphere_image->locate(b,uv,pitch)) return false;
+    feature.rays.push_back(b);feature.ray_pitch.push_back(pitch);
+    feature.ray_basis.push_back(spherical::tangentBasis(b));
+  }
   // Check the complete coarsest footprint before retaining a reference.
   SphericalWarp warp;
   if(!prepareSphericalWarp(feature,patch_pyrimid_level-1,warp) || !depthConsistent(*feature.point_,warp)) return false;
@@ -942,85 +975,100 @@ bool VIOManager::buildSphericalReference(Feature& feature)
 bool VIOManager::prepareSphericalWarp(const Feature& feature,int level,SphericalWarp& warp) const
 {
   using namespace spherical;
-  warp=SphericalWarp{};
+  warp.ready=false;warp.cover=0;
   const auto& pt=*feature.point_;
-  if(!feature.sphere_image || feature.rays.size()!=size_t(sample_count)) return false;
+  if(!feature.sphere_image || feature.rays.size()!=size_t(sample_count) || feature.ray_pitch.size()!=feature.rays.size() || feature.ray_basis.size()!=feature.rays.size()) return false;
+  warp.world.resize(sample_count);warp.kernels.resize(sample_count);
+  warp.reference.resize(sample_count);warp.current.resize(sample_count);
   const M3D Rrw=feature.T_f_w_.rotationMatrix();
   const V3D trw=feature.T_f_w_.translation();
-  const V3D nr=Rrw*pt.normal_;
-  const double height=nr.dot(Rrw*pt.plane_center+trw);
+  const V3D nr=Rrw*pt.normal_,ref_center=Rrw*pt.plane_center+trw;
+  const double height=nr.dot(ref_center);
   const M3D Rcr=Rcw*Rrw.transpose();
-  const V3D nc=Rcw*pt.normal_;
-  const double current_height=nc.dot(Rcw*pt.plane_center+Pcw);
-  const auto finiteSupport=[&](const Image& image,const Sample& sample,const M3D& rotation,
-                             const V3D& translation,const V3D& normal,double h) {
-    for(const auto& weight:sample.weights) {
-      const int width=image.atlas().width();
-      const V3D ray=image.atlas().ray(weight.first%width,weight.first/width).normalized();
-      V3D surface;
-      if(!intersectPlane(ray,normal,h,surface)) return false;
-      const V3D world=rotation.transpose()*(surface-translation);
-      if((world-pt.plane_center).norm()>3*pt.plane_radius) return false;
-    }
-    return true;
-  };
-  for(const V3D& br:feature.rays) {
-    V3D pr;
+  const V3D nc=Rcw*pt.normal_,cur_center=Rcw*pt.plane_center+Pcw;
+  const V3D center_bearing=(Rcw*pt.pos_+Pcw).normalized();
+  const PlaneSupport ref_support{nr,ref_center,height,3*pt.plane_radius};
+  const PlaneSupport cur_support{nc,cur_center,nc.dot(cur_center),3*pt.plane_radius};
+  Sample reference;
+  for(int k=0;k<sample_count;++k) {
+    const V3D& br=feature.rays[k];V3D pr;
     if(!intersectPlane(br,nr,height,pr)) return false;
-    const V3D world=Rrw.transpose()*(pr-trw), pc=Rcw*world+Pcw;
-    if(pc.squaredNorm()<1e-12 || (world-pt.plane_center).norm()>3*pt.plane_radius) return false;
-    const V3D bc=pc.normalized();
+    const V3D world=Rrw.transpose()*(pr-trw),pc=Rcw*world+Pcw;
+    const double range=pc.norm();
+    if(range<1e-6 || (world-pt.plane_center).norm()>3*pt.plane_radius) return false;
+    const V3D bc=pc/range;
     const double den=nr.dot(br);
     if(std::abs(den)<1e-6 || den*nc.dot(bc)<=0) return false;
-    V2D uv; double rp,cp;
-    if(!feature.sphere_image->locate(br,uv,rp) || !sphere_image->locate(bc,uv,cp)) return false;
+    V2D uv;double cp;
+    if(!sphere_image->locate(bc,uv,cp)) return false;
+    const double rp=feature.ray_pitch[k];
     const M3D dp=pr.norm()*(M3D::Identity()-br*nr.transpose()/den);
-    const Eigen::Matrix2d A=tangentBasis(bc).transpose()*(M3D::Identity()-bc*bc.transpose())/
-      pc.norm()*Rcr*dp*tangentBasis(br);
-    const double minimum=Eigen::JacobiSVD<Eigen::Matrix2d>(A).singularValues().minCoeff();
+    const auto basis=tangentBasis(bc);
+    const Eigen::Matrix2d A=basis.transpose()*(M3D::Identity()-bc*bc.transpose())/
+      range*Rcr*dp*feature.ray_basis[k];
+    const Eigen::Matrix2d metric=A*A.transpose();
+    // Closed-form 2x2 singular values: identical bandwidth rule, no SVD.
+    const double maximum=0.5*(metric.trace()+std::hypot(metric(0,0)-metric(1,1),2*metric(0,1)));
+    const double determinant=A.determinant();
+    if(!(maximum>0)) return false;
+    const double minimum=std::abs(determinant)/std::sqrt(maximum);
     if(!(minimum>1e-6)) return false;
     const double radius=(1<<level)*std::max({2.5*rp,2.5*cp/minimum,patch_radius/std::sqrt(double(sample_count))});
-    const Eigen::Matrix2d footprint=Eigen::Matrix2d::Identity()*radius*radius;
-    const M3D ar=precision(br,footprint), ac=precision(bc,A*footprint*A.transpose());
-    Sample reference,current;
-    if(!feature.sphere_image->sample(br,ar,reference) || !sphere_image->sample(bc,ac,current)) return false;
-    if(!finiteSupport(*feature.sphere_image,reference,Rrw,trw,nr,height) ||
-       !finiteSupport(*sphere_image,current,Rcw,Pcw,nc,current_height)) return false;
-    warp.world.push_back(world); warp.precision.push_back(ac);
-    warp.reference.push_back(float(255*reference.value));
+    const SamplingKernel ar{M3D::Identity()/(radius*radius),radius};
+    // Radial precision uses the largest ellipse axis, as in precision().
+    const double bound=radius*std::sqrt(maximum);
+    const SamplingKernel ac{basis*metric.inverse()*basis.transpose()/(radius*radius)+
+                           bc*bc.transpose()/(bound*bound),bound};
+    if(!feature.sphere_image->sample(br,ar,reference,false,&ref_support) ||
+       !sphere_image->sample(bc,ac,warp.current[k],true,&cur_support)) return false;
+    warp.world[k]=world;warp.kernels[k]=ac;warp.reference[k]=float(255*reference.value);
+    warp.cover=std::max(warp.cover,(bc-center_bearing).norm()+bound);
   }
+  warp.pose_R=Rcw;warp.pose_t=Pcw;warp.ready=true;
   return true;
+}
+
+
+void VIOManager::updateDepthIndex()
+{
+  if(!current_points) return;
+  if(depth_index_valid && (depth_pose_R-Rcw).squaredNorm()==0 && (depth_pose_t-Pcw).squaredNorm()==0) return;
+  depth_heads.fill(-1);depth_rays.clear();depth_rays.reserve(current_points->size());
+  depth_origin=-Rcw.transpose()*Pcw;
+  for(const auto& point:*current_points) {
+    const V3D delta=point.point_w-depth_origin;const double range=delta.norm();
+    if(!std::isfinite(range) || range<1e-6) continue;
+    const V3D ray=delta/range,bearing=Rcw*ray;
+    const int key=depthKey(depthCell(bearing.x()),depthCell(bearing.y()),depthCell(bearing.z()));
+    depth_rays.push_back({ray,bearing,range,std::max(0.0,ray.dot(point.var*ray)),depth_heads[key]});
+    depth_heads[key]=int(depth_rays.size())-1;
+  }
+  depth_pose_R=Rcw;depth_pose_t=Pcw;depth_index_valid=true;
 }
 
 bool VIOManager::depthConsistent(const VisualPoint& pt,const SphericalWarp& warp) const
 {
-  if(!current_points || warp.world.empty()) return false;
-  const V3D origin=-Rcw.transpose()*Pcw;
+  if(!depth_index_valid || warp.world.empty() || !warp.ready) return false;
   const V3D center=(Rcw*pt.pos_+Pcw).normalized();
-  double cover=0;
-  for(size_t k=0;k<warp.world.size();++k) {
-    const V3D b=(Rcw*warp.world[k]+Pcw).normalized();
-    const auto basis=spherical::tangentBasis(b);
-    const Eigen::Matrix2d precision=basis.transpose()*warp.precision[k]*basis;
-    const double minimum=Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d>(precision).eigenvalues().minCoeff();
-    if(!(minimum>0)) return false;
-    cover=std::max(cover,(b-center).norm()+1/std::sqrt(minimum));
-  }
-  for(const auto& point:*current_points) {
-    const V3D delta=point.point_w-origin; const double measured=delta.norm();
-    if(measured<1e-6) continue;
-    const V3D ray=delta/measured;
-    if((Rcw*ray-center).norm()>cover) continue;
-    const double den=pt.normal_.dot(ray);
-    if(std::abs(den)<1e-6) return false;
-    const double predicted=pt.normal_.dot(pt.plane_center-origin)/den;
-    if(predicted<=0) return false;
-    Eigen::Matrix<double,1,6> J;
-    J.head<3>()=(pt.plane_center-origin-predicted*ray).transpose()/den;
-    J.tail<3>()=pt.normal_.transpose()/den;
-    const double variance=std::max(0.0,(J*pt.plane_cov*J.transpose())(0,0))+
-      std::max(0.0,ray.dot(point.var*ray))+range_noise*range_noise+pt.roughness/(den*den);
-    if(std::abs(measured-predicted)>3*std::sqrt(std::max(variance,1e-12))) return false;
-  }
+  const double cover=warp.cover+1e-10,cover_squared=cover*cover;
+  const int xmin=depthCell(center.x()-cover),xmax=depthCell(center.x()+cover);
+  const int ymin=depthCell(center.y()-cover),ymax=depthCell(center.y()+cover);
+  const int zmin=depthCell(center.z()-cover),zmax=depthCell(center.z()+cover);
+  for(int z=zmin;z<=zmax;++z) for(int y=ymin;y<=ymax;++y) for(int x=xmin;x<=xmax;++x)
+    for(int i=depth_heads[depthKey(x,y,z)];i>=0;i=depth_rays[i].next) {
+      const auto& point=depth_rays[i];
+      if((point.bearing-center).squaredNorm()>cover_squared) continue;
+      const double den=pt.normal_.dot(point.ray);
+      if(std::abs(den)<1e-6) return false;
+      const double predicted=pt.normal_.dot(pt.plane_center-depth_origin)/den;
+      if(predicted<=0) return false;
+      Eigen::Matrix<double,1,6> J;
+      J.head<3>()=(pt.plane_center-depth_origin-predicted*point.ray).transpose()/den;
+      J.tail<3>()=pt.normal_.transpose()/den;
+      const double variance=std::max(0.0,(J*pt.plane_cov*J.transpose())(0,0))+
+        point.variance+range_noise*range_noise+pt.roughness/(den*den);
+      const double error=point.range-predicted;
+      if(error*error>9*std::max(variance,1e-12)) return false;
+    }
   return true;
 }
