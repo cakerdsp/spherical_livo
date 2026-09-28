@@ -1,0 +1,102 @@
+Panels:
+  - Class: rviz/Displays
+    Name: Displays
+  - Class: rviz/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Enabled: true
+  Global Options:
+    Background Color: 30; 30; 30
+    Fixed Frame: world
+    Frame Rate: 30
+  Displays:
+    - Class: rviz/Grid
+      Name: Grid
+      Enabled: true
+      Value: true
+      Alpha: 0.3
+      Cell Size: 1
+      Color: 120; 120; 120
+      Plane: XY
+      Plane Cell Count: 50
+      Reference Frame: <Fixed Frame>
+    - Class: rviz/Axes
+      Name: World axes
+      Enabled: true
+      Value: true
+      Length: 1
+      Radius: 0.03
+      Reference Frame: <Fixed Frame>
+    - Class: rviz/PointCloud2
+      Name: Recent cloud (30 s)
+      Enabled: true
+      Value: true
+      Topic: /spherical_livo/cloud
+      Queue Size: 5
+      Alpha: 1
+      Decay Time: 30
+      Position Transformer: XYZ
+      Color Transformer: AxisColor
+      Axis: Z
+      Autocompute Value Bounds:
+        Value: false
+        Min Value: -3
+        Max Value: 5
+      Use Fixed Frame: true
+      Use rainbow: true
+      Invert Rainbow: false
+      Style: Points
+      Size (Pixels): 2
+      Size (m): 0.03
+      Selectable: false
+      Unreliable: false
+    - Class: rviz/Path
+      Name: Trajectory
+      Enabled: true
+      Value: true
+      Topic: /spherical_livo/path
+      Queue Size: 5
+      Buffer Length: 1
+      Alpha: 1
+      Color: 255; 210; 40
+      Line Style: Billboards
+      Line Width: 0.04
+      Pose Style: None
+    - Class: rviz/Odometry
+      Name: IMU pose
+      Enabled: true
+      Value: true
+      Topic: /spherical_livo/odometry
+      Queue Size: 5
+      Keep: 1
+      Position Tolerance: 0
+      Angle Tolerance: 0
+      Covariance:
+        Value: false
+      Shape:
+        Value: Axes
+        Alpha: 1
+        Axes Length: 0.6
+        Axes Radius: 0.03
+  Tools:
+    - Class: rviz/Interact
+    - Class: rviz/MoveCamera
+    - Class: rviz/Select
+    - Class: rviz/FocusCamera
+  Views:
+    Current:
+      Class: rviz/Orbit
+      Name: Current View
+      Target Frame: <Fixed Frame>
+      Distance: 20
+      Pitch: 0.65
+      Yaw: 0.785
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Near Clip Distance: 0.01
+Window Geometry:
+  Width: 1280
+  Height: 800

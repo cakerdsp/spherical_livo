@@ -31,7 +31,7 @@ sudo apt install -y build-essential cmake git unzip \
   ros-noetic-roscpp ros-noetic-sensor-msgs ros-noetic-geometry-msgs \
   ros-noetic-nav-msgs ros-noetic-visualization-msgs \
   ros-noetic-pcl-ros ros-noetic-pcl-conversions ros-noetic-tf \
-  ros-noetic-cv-bridge ros-noetic-rosbag ros-noetic-roslaunch
+  ros-noetic-cv-bridge ros-noetic-rosbag ros-noetic-roslaunch ros-noetic-rviz
 ```
 
 没有 GPU/CUDA、Sophus 或 vikit 依赖。预处理保留了 `livox_ros_driver2/CustomMsg` 接口，因此三种数据集都需要安装 **ROS1 版** Livox Driver 2 消息依赖；离线回放时不需要启动驱动节点。
@@ -165,7 +165,15 @@ IMU 初始化计数在实现里按采样累计，并非相机帧数；提高到 
 - `trajectory.txt`：`timestamp tx ty tz qx qy qz qw`，输出 **IMU** 位姿。
 - `visual.csv`：相机编号、有效 patch、跨相机参考计数、是否更新、残差及耗时。
 
-ROS 输出为 `/spherical_livo/odometry`、`/spherical_livo/path`、`/spherical_livo/cloud`，固定坐标系 `world`。需要可视化时可另装 `ros-noetic-rviz`，启动 RViz 后添加 Path、PointCloud2 并选择对应话题。
+ROS 输出为 `/spherical_livo/odometry`、`/spherical_livo/path`、`/spherical_livo/cloud`，固定坐标系 `world`。所有启动入口默认开启 RViz，共用 `rviz_cfg/spherical_livo.rviz`，已配置 `world` 坐标系、点云、轨迹和当前 IMU 位姿。点云显示累积最近 30 秒发布的数据，不是完整历史地图；显示累积不会影响算法地图。
+
+已经部署的机器若尚未安装 RViz，执行 `sudo apt install ros-noetic-rviz`。无桌面环境时关闭可视化：
+
+```bash
+roslaunch spherical_livo mapping_private_mid360.launch rviz:=false
+```
+
+HILTI22、M2DGR 和通用 `mapping.launch` 使用相同开关。RViz 不是必需进程，关闭其窗口不停止估计器。源码工作空间拉取本次配置更新后无需重新编译 C++；使用 `catkin_make install` 的部署需重新安装，以复制新的配置文件。
 
 | 现象 | 处理 |
 | --- | --- |

@@ -58,6 +58,8 @@ rosbag play --clock -r 0.5 /absolute/path/to/sequence.bag
 | HILTI22 | `mapping_hilti22.launch` | C0、C3、C4 三路，可选五路 | `hilti22.yaml` / `cameras_hilti22.yaml` |
 | M2DGR | `mapping_m2dgr.launch` | left、third、fourth 三路，可选五路 | `m2dgr.yaml` / `cameras_m2dgr.yaml` |
 
+所有启动入口默认开启 RViz，共用 `rviz_cfg/spherical_livo.rviz`：固定坐标系 `world`，显示最近 30 秒点云、轨迹和当前 IMU 位姿。无需图形界面时加 `rviz:=false`；关闭 RViz 窗口不会停止估计器。目标机需要安装 `ros-noetic-rviz`。
+
 配置在 `config/` 下。私有与 M2DGR 标定来自 cake_slam；HILTI22 使用重新整理的官方逐相机标定，见 [来源与编号对应](docs/calibration_sources.md)。参数均为未回放验证的默认值。私有 PointCloud2 使用类型 **8**，与旧项目的类型编号不同。
 
 自有设备使用：
