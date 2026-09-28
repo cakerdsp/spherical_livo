@@ -4,6 +4,7 @@
 # T_CL = T_CI * T_IL; t_corrected = t_image + timeshift_cam_imu.
 # Static untested defaults. Each camera uses its own official calibration.
 common:
+  multi_cam_sync_tolerance_ms: 1.0
   num_cameras: 3
   lid_topic: "/hesai/pandar"
   imu_topic: "/alphasense/imu"

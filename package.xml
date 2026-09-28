@@ -11,6 +11,8 @@
   <depend>nav_msgs</depend><depend>visualization_msgs</depend><depend>pcl_ros</depend>
   <depend>pcl_conversions</depend><depend>tf</depend><depend>cv_bridge</depend>
   <depend>livox_ros_driver2</depend><depend>eigen</depend>
+  <depend>image_transport</depend><depend>libsophus-dev</depend>
+  <depend>libfmt-dev</depend><depend>boost</depend>
   <depend>libopencv-dev</depend><depend>libpcl-all-dev</depend>
   <exec_depend>rviz</exec_depend>
   <test_depend>rostest</test_depend>

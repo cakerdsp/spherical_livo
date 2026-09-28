@@ -1,6 +1,7 @@
 # First N cameras are active; the supplied native views are left, third,
 # fourth, fifth, sixth. The provisional sky-camera extrinsic is excluded.
 common:
+  multi_cam_sync_tolerance_ms: 1.0
   num_cameras: 3
   lid_topic: /velodyne_points
   imu_topic: /handsfree/imu

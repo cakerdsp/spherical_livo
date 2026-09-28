@@ -13,25 +13,27 @@ which is included as part of this source code package.
 #ifndef COMMON_LIB_H
 #define COMMON_LIB_H
 
+#include <algorithm>
+#include <deque>
+#include <list>
+#include <memory>
+#include <vector>
+#include <iomanip>
 #include <utils/so3_math.h>
 #include <utils/types.h>
 #include <utils/color.h>
 #include <opencv2/opencv.hpp>
 #include <sensor_msgs/Imu.h>
-#include <ros/ros.h>
-#include <deque>
-#include <memory>
-#include <vector>
-#include <omp.h>
+#include <vikit/sophus_compat.h>
 #include <tf/transform_broadcaster.h>
 
 using namespace std;
 using namespace Eigen;
-
+using SE3 = fast_livo::SE3d;
 
 #define print_line std::cout << __FILE__ << ", " << __LINE__ << std::endl;
 #define G_m_s2 (9.81)   // Gravaty const in GuangDong/China
-#define DIM_STATE (18)  // Dimension of states (Let Dim(SO(3)) = 3)
+#define DIM_STATE (19)  // Dimension of states (Let Dim(SO(3)) = 3)
 #define INIT_COV (0.01)
 #define SIZE_LARGE (500)
 #define SIZE_SMALL (100)
@@ -64,12 +66,29 @@ enum EKF_STATE
   LO = 3
 };
 
+struct MultiCameraFrame
+{
+  uint64_t stamp_ns = 0;
+  double timestamp = 0.0;  //!< Anchor capture time used by LIO/VIO synchronization.
+  int frame_id = -1;
+  std::vector<cv::Mat> images;
+  std::vector<uint64_t> image_stamp_ns;
+  std::vector<double> raw_timestamps;
+  std::vector<double> corrected_timestamps;
+  std::vector<double> capture_timestamps;
+  std::vector<double> td_used;
+  std::vector<int> time_offset_group;
+};
+
 struct MeasureGroup
 {
   double vio_time;
   double lio_time;
   deque<sensor_msgs::Imu::ConstPtr> imu;
   cv::Mat img;
+  MultiCameraFrame multi_cam_frame;
+  bool has_multi_cam_frame = false;
+  double img_time = 0.0;
   MeasureGroup()
   {
     vio_time = 0.0;
@@ -138,8 +157,10 @@ struct StatesGroup
     this->bias_g = V3D::Zero();
     this->bias_a = V3D::Zero();
     this->gravity = V3D::Zero();
+    this->inv_expo_time = 1.0;
     this->cov = MD(DIM_STATE, DIM_STATE)::Identity() * INIT_COV;
-    this->cov.block<9, 9>(9, 9) = MD(9, 9)::Identity() * 0.00001;
+    this->cov(6, 6) = 0.00001;
+    this->cov.block<9, 9>(10, 10) = MD(9, 9)::Identity() * 0.00001;
   };
 
   StatesGroup(const StatesGroup &b)
@@ -150,6 +171,7 @@ struct StatesGroup
     this->bias_g = b.bias_g;
     this->bias_a = b.bias_a;
     this->gravity = b.gravity;
+    this->inv_expo_time = b.inv_expo_time;
     this->cov = b.cov;
   };
 
@@ -161,6 +183,7 @@ struct StatesGroup
     this->bias_g = b.bias_g;
     this->bias_a = b.bias_a;
     this->gravity = b.gravity;
+    this->inv_expo_time = b.inv_expo_time;
     this->cov = b.cov;
     return *this;
   };
@@ -170,10 +193,11 @@ struct StatesGroup
     StatesGroup a;
     a.rot_end = this->rot_end * Exp(state_add(0, 0), state_add(1, 0), state_add(2, 0));
     a.pos_end = this->pos_end + state_add.block<3, 1>(3, 0);
-    a.vel_end = this->vel_end + state_add.block<3, 1>(6, 0);
-    a.bias_g = this->bias_g + state_add.block<3, 1>(9, 0);
-    a.bias_a = this->bias_a + state_add.block<3, 1>(12, 0);
-    a.gravity = this->gravity + state_add.block<3, 1>(15, 0);
+    a.inv_expo_time = this->inv_expo_time + state_add(6, 0);
+    a.vel_end = this->vel_end + state_add.block<3, 1>(7, 0);
+    a.bias_g = this->bias_g + state_add.block<3, 1>(10, 0);
+    a.bias_a = this->bias_a + state_add.block<3, 1>(13, 0);
+    a.gravity = this->gravity + state_add.block<3, 1>(16, 0);
 
     a.cov = this->cov;
     return a;
@@ -183,23 +207,25 @@ struct StatesGroup
   {
     this->rot_end = this->rot_end * Exp(state_add(0, 0), state_add(1, 0), state_add(2, 0));
     this->pos_end += state_add.block<3, 1>(3, 0);
-    this->vel_end += state_add.block<3, 1>(6, 0);
-    this->bias_g += state_add.block<3, 1>(9, 0);
-    this->bias_a += state_add.block<3, 1>(12, 0);
-    this->gravity += state_add.block<3, 1>(15, 0);
+    this->inv_expo_time += state_add(6, 0);
+    this->vel_end += state_add.block<3, 1>(7, 0);
+    this->bias_g += state_add.block<3, 1>(10, 0);
+    this->bias_a += state_add.block<3, 1>(13, 0);
+    this->gravity += state_add.block<3, 1>(16, 0);
     return *this;
   };
 
-  Matrix<double, DIM_STATE, 1> operator-(const StatesGroup &b) const
+  Matrix<double, DIM_STATE, 1> operator-(const StatesGroup &b)
   {
     Matrix<double, DIM_STATE, 1> a;
     M3D rotd(b.rot_end.transpose() * this->rot_end);
     a.block<3, 1>(0, 0) = Log(rotd);
     a.block<3, 1>(3, 0) = this->pos_end - b.pos_end;
-    a.block<3, 1>(6, 0) = this->vel_end - b.vel_end;
-    a.block<3, 1>(9, 0) = this->bias_g - b.bias_g;
-    a.block<3, 1>(12, 0) = this->bias_a - b.bias_a;
-    a.block<3, 1>(15, 0) = this->gravity - b.gravity;
+    a(6, 0) = this->inv_expo_time - b.inv_expo_time;
+    a.block<3, 1>(7, 0) = this->vel_end - b.vel_end;
+    a.block<3, 1>(10, 0) = this->bias_g - b.bias_g;
+    a.block<3, 1>(13, 0) = this->bias_a - b.bias_a;
+    a.block<3, 1>(16, 0) = this->gravity - b.gravity;
     return a;
   };
 
@@ -213,6 +239,7 @@ struct StatesGroup
   M3D rot_end;                              // the estimated attitude (rotation matrix) at the end lidar point
   V3D pos_end;                              // the estimated position at the end lidar point (world frame)
   V3D vel_end;                              // the estimated velocity at the end lidar point (world frame)
+  double inv_expo_time;                     // the estimated inverse exposure time (no scale)
   V3D bias_g;                               // gyroscope bias
   V3D bias_a;                               // accelerator bias
   V3D gravity;                              // the estimated gravity acceleration

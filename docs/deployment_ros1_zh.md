@@ -8,16 +8,12 @@
 
 尚未安装 ROS1 的机器先按 [Noetic 安装文档](https://wiki.ros.org/noetic/Installation/Ubuntu) 配置软件源并安装 Noetic。已有 ROS1 环境可直接继续。不要在 source ROS2 Humble 的终端里执行这些命令。
 
-需要转移的是**这份已修改的源码**。目前 `origin` 仍指向官方 FAST-LIVO2，重新克隆它或导出上游 HEAD 都不会得到此次实现。随本次交付提供 `spherical_livo_source.zip`，包含当前源码、配置和文档，不含 `.git`、数据集和构建产物。
-
-在目标 Ubuntu 机器准备好压缩包后：
+使用你自己的 GitHub 仓库源码（包括本次恢复后的提交），不要重新下载官方 FAST-LIVO2 来代替修改版。已有部署目录可以 git pull；首次部署：
 
 ```bash
 mkdir -p ~/spherical_ws/src
-unzip ~/Downloads/spherical_livo_source.zip -d ~/spherical_ws/src
+git clone https://github.com/cakerdsp/spherical_livo.git ~/spherical_ws/src/spherical_livo
 ```
-
-解压后的文件应为 `~/spherical_ws/src/spherical_livo/package.xml`，不要多套一层同名目录。也可直接复制整个本地 `spherical_livo` 文件夹到 `~/spherical_ws/src/`。
 
 ## 2. 安装依赖
 
@@ -27,14 +23,18 @@ unzip ~/Downloads/spherical_livo_source.zip -d ~/spherical_ws/src
 source /opt/ros/noetic/setup.bash
 sudo apt update
 sudo apt install -y build-essential cmake git unzip \
-  libeigen3-dev libopencv-dev libpcl-dev \
+  libeigen3-dev libopencv-dev libpcl-dev libfmt-dev libboost-thread-dev \
   ros-noetic-roscpp ros-noetic-sensor-msgs ros-noetic-geometry-msgs \
   ros-noetic-nav-msgs ros-noetic-visualization-msgs \
   ros-noetic-pcl-ros ros-noetic-pcl-conversions ros-noetic-tf \
-  ros-noetic-cv-bridge ros-noetic-rosbag ros-noetic-roslaunch ros-noetic-rviz
+  ros-noetic-cv-bridge ros-noetic-image-transport ros-noetic-rosbag ros-noetic-roslaunch ros-noetic-rviz
 ```
 
-没有 GPU/CUDA、Sophus 或 vikit 依赖。预处理保留了 `livox_ros_driver2/CustomMsg` 接口，因此三种数据集都需要安装 **ROS1 版** Livox Driver 2 消息依赖；离线回放时不需要启动驱动节点。
+不需要 GPU/CUDA。恢复原版 Frame/VIOManager 后重新需要 Sophus；优先复用目标机 cake_slam / FAST-LIVO2 已安装的 Sophus。旧版 `sophus/se3.h` 和新版 `sophus/se3.hpp` 均由 cake_slam 的兼容头支持。最小 vikit 头文件和 vision.cpp 已从 cake_slam 随源码带入，不需要另建 vikit ROS 包。
+
+如果 `find_package(Sophus)` 找不到已有安装，可设置 `-DSophus_DIR=/实际安装前缀/share/sophus/cmake`（以机器上的 SophusConfig.cmake 为准）。没有安装时，可按目标机 cake_slam 的既有依赖安装流程安装 Sophus；本次没有执行任何安装。
+
+预处理保留了 `livox_ros_driver2/CustomMsg` 接口，因此三种数据集都需要安装 **ROS1 版** Livox Driver 2 消息依赖；离线回放时不需要启动驱动节点。
 
 ### Livox SDK2 与驱动
 
@@ -160,55 +160,35 @@ IMU 初始化计数在实现里按采样累计，并非相机帧数；提高到 
 
 三级视觉尺度、插值支持、异常值处理和深度判据由实现统一处理，不需要恢复旧配置中的虚拟焦距、NCC 阈值、像素 patch、在线外参或方向性开关。开启的 `local_map/map_sliding_en` 是原有雷达地图空间裁剪，用于限制长序列地图范围，不是高级共享视觉地图管理。
 
-## 6. 结果与常见部署问题
+## 6. 恢复后的输出与显示
 
-设置 `output_dir` 后生成：
+`output_dir` 非空时写 `trajectory.txt`（原版 EVO 输出，LIO 更新后的 IMU 位姿）以及 `mat_pre.txt`、`mat_out.txt`。`pcd_save/pcd_save_en`、`image_save/img_save_en` 按原版开关保存；默认不额外写大量点云／图像。旧独立估计器的 `visual.csv` 已随其移除。
 
-- `trajectory.txt`：`timestamp tx ty tz qx qy qz qw`，输出 **IMU** 位姿。
-- `visual.csv`：相机编号、有效 patch、跨相机参考计数、是否更新、残差及耗时。
+RViz 默认开启，固定坐标系 `camera_init`，共用 `rviz_cfg/spherical_livo.rviz`：
 
-所有启动入口默认开启 RViz，共用 `rviz_cfg/spherical_livo.rviz`，固定坐标系 `world`。
-
-| 话题 | 内容与默认显示 |
+| 话题 | 内容 |
 | --- | --- |
-| `/spherical_livo/cloud_rgb` | `PointXYZRGB`，默认启用 RGB8 着色，累积最近 30 秒 |
-| `/spherical_livo/cloud` | 原始 LIO 强度点云；RViz 默认关闭，需要查看相机视野外的点时启用 |
-| `/spherical_livo/image/camera_N` | 原图及实际球面 patch 采样位置；默认显示相机 0、1，相机 2–4 在 Displays 中勾选 |
-| `/spherical_livo/path`、`/spherical_livo/odometry` | 轨迹与当前 IMU 位姿 |
+| `/cloud_registered` | 原版点云发布入口；LIVO 输出 RGB8，视野外保留灰色；纯 LIO 输出强度点云 |
+| `/rgb_img/camera_N` | 各原始相机图像及球面采样位置；默认显示 0、1 |
+| `/rgb_img` | 相机 0 图像，保留原版入口 |
+| `/path`、`/aft_mapped_to_init` | 原版轨迹与里程计 |
+| `/cloud_effected` | 原版有效雷达约束点；publish/pub_effect_point_en 开启时发布 |
 
-图像小点是球面样本通过当前位姿投影回原图的位置，小圆是 patch 中心。绿色表示最终被接受的同相机参考，紫色表示跨相机参考，黄色表示本帧新建参考（未参与本帧更新）。无有效视觉更新时不会画出“已接受”的跟踪点。初始化期间也会发布收到的图像并标注 initializing。
+绿色／蓝色中心标记沿用原版跟踪误差显示，黄色小点是球面采样投影。完成 IMU 初始化、LIO 有可用点后才进入视觉处理；初始化阶段没有独立可视化节点代发图像。着色与图像发布直接在 LIVMapper 内完成。
 
-着色采用 cake_slam 的世界点投影、原图双线性取色、BGR 转 RGB 流程，投影使用本项目的球面 LUT，支持超半球鱼眼。每次图像事件用该相机图像及对应事件位姿为最近一批 LIO 世界点着色，各相机顺序发布到同一 RGB 话题；不会把异步相机的旧图像套用到当前位姿。只发布投影有效的点，单目灰度输入会得到灰度 RGB。它是可视化点云，未增加稠密遮挡推理或完整历史彩色地图。RViz 的 30 秒累积仅用于显示。
-
-终端采用 FAST-LIVO2/cake_slam 风格的 ANSI 彩色加粗边框表格：蓝色边框和表头、LIO 青色数值、VIO 绿色数值。单位秒，显示各阶段当前耗时，底部单列 `Current Total Time` 与 `Average Total Time`；每张表最多每墙钟秒刷新一次，统计覆盖全部完成事件，不依赖 `/clock`。LIO 包含 IMU/去畸变、降采样/坐标变换、配准/EKF、地图维护、点云发布和总耗时。VIO 包含图像/候选筛选、patch 准备、线性化/求解/协方差、参考插入、VIO 总耗时及独立列出的 RGB/图像发布耗时。VIO 总耗时不含 RGB/图像发布；两者均不包括订阅回调中的图像解码、LiDAR 预处理和排队等待。LIO 初始化及不足点数的传播事件不计入 LIO 表；VIO 均值按相机分别累计。
-
-LIO 保留已有的 4 线程 OpenMP 点到平面匹配；着色使用最多 4 个线程逐点计算，少于 1024 点时串行。并行线程只写各自槽位，结果按原点序串行汇总；VIO 状态更新、相机事件与地图修改仍顺序执行。无订阅者时跳过对应图像绘制或点云着色，无需新增调参项。
-
-已经部署的机器若尚未安装 RViz，执行 `sudo apt install ros-noetic-rviz`。无桌面环境时关闭可视化：
+终端使用原版蓝色加粗边框 LIO/VIO 计时表，每个完成事件打印。LIO 点到平面匹配、视觉逐 patch 残差、逐点着色使用 4 线程 OpenMP；状态、组帧和地图更新顺序执行。
 
 ```bash
+# 不开 RViz
 roslaunch spherical_livo mapping_private_mid360.launch rviz:=false
+# 单独重新打开本次配置
+rviz -d $(rospack find spherical_livo)/rviz_cfg/spherical_livo.rviz
 ```
 
-HILTI22、M2DGR 和通用 `mapping.launch` 使用相同开关。RViz 不是必需进程，关闭其窗口不停止估计器。本次更新包含 C++ 修改，拉取后需要重新编译并 source 工作空间；使用 `catkin_make install` 的部署还需重新安装，以复制新的配置文件。重新启动 launch/RViz，已打开的旧 RViz 窗口不会自动重载配置。
+## 7. 输入同步
 
-四个 launch 都显式加载同一个共享配置。RViz 中 `RGB Colored Cloud (30 s)` 默认订阅 `/spherical_livo/cloud_rgb` 并使用 RGB8；`VIO Camera 0` 和 `VIO Camera 1` 默认启用，分别订阅两路带球面采样点的处理图像，面板设为展开。相机 2–4 可在 Displays 中启用。若另一台机器仍显示旧配置，可以直接用当前 ROS 环境找到的包打开：
+默认 use_sim_time=false，主循环使用 WallRate；普通 `rosbag play BAG` 不要求 `--clock`。若主动设置 use_sim_time=true，应提供仿真 clock，供 RViz 等 ROS 工具使用。
 
-```bash
-rviz -d "$(rospack find spherical_livo)/rviz_cfg/spherical_livo.rviz"
-```
+节点显示 `Sensor subscribers ready` 后等待各已配置相机、雷达、IMU 消息。同步沿原版／cake_slam：完整图像组 → 雷达／IMU 覆盖图像时间 → LIO → VIO。`common/num_cameras` 必须与实际播放话题一致；缺一路会等待或丢弃不完整组。私有两路沿 cake_slam 使用 40 ms 配对容差，公开预设 1 ms；组内图像按最大校正时间处理，这不是连续时间模型。
 
-若这条命令仍打开旧内容，检查 `rospack find spherical_livo` 指向的工作空间是否是此次更新并 source 的版本。
-
-| 现象 | 处理 |
-| --- | --- |
-| 找不到 `livox_ros_driver2` / `CustomMsg.h` | 先编译 ROS1 驱动，再 source 驱动工作空间后编译本包 |
-| 编译进程 `cc1plus` 被 killed | 改为 `-j1 -l1`，通常是编译内存不足 |
-| 找不到 `spherical_livo` 包 | 检查源码层级和 `source ~/spherical_ws/devel/setup.bash` |
-| `Spherical LIVO ready` 前等待较久 | 正在建立原图 LUT，等准备完成再播放 bag |
-| 图像尺寸不匹配 | 使用与内参相符的原图，不能把缩放或去畸变后的图像套用原始标定 |
-| 提示 `has no time field` | 已启用旧适配层的按点序近似时间；`scan_rate` 是点云发布频率，私有预设为 10 Hz |
-| 迟到图像或队列容量报错 | 先降低 bag 播放速度，并确认 IMU、点云、图像处于同一时间基准 |
-| 有里程计但视觉 `updated` 长期为 0 | LiDAR 仍可独立运行；先查图像输入、标定和深度支持，不能当作视觉已正常融合 |
-
-首次部署只需完成编译与一段数据回放，确认输入匹配及视觉实际更新。本文没有安排繁复检查，也没有把尚未执行的编译、精度评估或性能测试写成已通过。
+重复播放同一包先重启节点。默认参数是未回放的工程起点；恢复主干并不构成编译成功或轨迹正确的保证。完整来源与变动见 restoration_scope.md。

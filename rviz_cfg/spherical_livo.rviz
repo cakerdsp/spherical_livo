@@ -9,7 +9,7 @@ Visualization Manager:
   Enabled: true
   Global Options:
     Background Color: 30; 30; 30
-    Fixed Frame: world
+    Fixed Frame: camera_init
     Frame Rate: 30
   Displays:
     - Class: rviz/Grid
@@ -33,7 +33,7 @@ Visualization Manager:
       Name: RGB Colored Cloud (30 s)
       Enabled: true
       Value: true
-      Topic: /spherical_livo/cloud_rgb
+      Topic: /cloud_registered
       Queue Size: 5
       Alpha: 1
       Decay Time: 30
@@ -45,10 +45,10 @@ Visualization Manager:
       Selectable: false
       Unreliable: false
     - Class: rviz/PointCloud2
-      Name: Uncolored LIO cloud (30 s)
+      Name: Effective LIO constraints
       Enabled: false
       Value: false
-      Topic: /spherical_livo/cloud
+      Topic: /cloud_effected
       Queue Size: 5
       Alpha: 1
       Decay Time: 30
@@ -71,7 +71,7 @@ Visualization Manager:
       Name: Trajectory
       Enabled: true
       Value: true
-      Topic: /spherical_livo/path
+      Topic: /path
       Queue Size: 5
       Buffer Length: 1
       Alpha: 1
@@ -83,7 +83,7 @@ Visualization Manager:
       Name: IMU pose
       Enabled: true
       Value: true
-      Topic: /spherical_livo/odometry
+      Topic: /aft_mapped_to_init
       Queue Size: 5
       Keep: 1
       Position Tolerance: 0
@@ -99,7 +99,7 @@ Visualization Manager:
       Name: VIO Camera 0
       Enabled: true
       Value: true
-      Image Topic: /spherical_livo/image/camera_0
+      Image Topic: /rgb_img/camera_0
       Transport Hint: raw
       Queue Size: 2
       Normalize Range: true
@@ -111,7 +111,7 @@ Visualization Manager:
       Name: VIO Camera 1
       Enabled: true
       Value: true
-      Image Topic: /spherical_livo/image/camera_1
+      Image Topic: /rgb_img/camera_1
       Transport Hint: raw
       Queue Size: 2
       Normalize Range: true
@@ -123,7 +123,7 @@ Visualization Manager:
       Name: VIO Camera 2
       Enabled: false
       Value: false
-      Image Topic: /spherical_livo/image/camera_2
+      Image Topic: /rgb_img/camera_2
       Transport Hint: raw
       Queue Size: 2
       Normalize Range: true
@@ -135,7 +135,7 @@ Visualization Manager:
       Name: VIO Camera 3
       Enabled: false
       Value: false
-      Image Topic: /spherical_livo/image/camera_3
+      Image Topic: /rgb_img/camera_3
       Transport Hint: raw
       Queue Size: 2
       Normalize Range: true
@@ -147,7 +147,7 @@ Visualization Manager:
       Name: VIO Camera 4
       Enabled: false
       Value: false
-      Image Topic: /spherical_livo/image/camera_4
+      Image Topic: /rgb_img/camera_4
       Transport Hint: raw
       Queue Size: 2
       Normalize Range: true

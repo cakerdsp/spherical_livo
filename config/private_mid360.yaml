@@ -4,6 +4,7 @@
 # Missing/non-varying point time uses its scan_rate-based approximation.
 # Defaults are reasoned starting values, not replay-tuned. See docs/deployment_ros1_zh.md.
 common:
+  multi_cam_sync_tolerance_ms: 40.0
   num_cameras: 2
   lid_topic: "/livox/lidar"
   imu_topic: "/livox/imu"

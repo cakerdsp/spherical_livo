@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>vikit_common</name>
+  <version>0.0.0</version>
+  <description>Common camera and vision utilities from RPG Vikit.</description>
+
+  <maintainer email="forster@ifi.uzh.ch">cforster</maintainer>
+  <license>GPLv3</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  <build_depend>libopencv-dev</build_depend>
+  <build_depend>libsophus-dev</build_depend>
+  <build_depend>libfmt-dev</build_depend>
+
+  <exec_depend>libopencv-dev</exec_depend>
+  <exec_depend>libsophus-dev</exec_depend>
+  <exec_depend>libfmt-dev</exec_depend>
+</package>

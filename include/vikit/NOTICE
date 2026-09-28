@@ -1,0 +1,3 @@
+Copied unchanged from cake_slam/third_party/rpg_vikit/vikit_common.
+Original authorship headers are retained. The vendored package manifest declares GPLv3.
+sophus_compat.h is the existing cake_slam compatibility shim.

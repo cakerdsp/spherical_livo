@@ -81,6 +81,8 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
   Eigen::Vector3d evecMax = evecs.real().col(evalsMax);
   Eigen::Matrix3d J_Q;
   J_Q << 1.0 / plane->points_size_, 0, 0, 0, 1.0 / plane->points_size_, 0, 0, 0, 1.0 / plane->points_size_;
+  // && evalsReal(evalsMid) > 0.05
+  //&& evalsReal(evalsMid) > 0.01
   if (evalsReal(evalsMin) < planer_threshold_)
   {
     for (int i = 0; i < points.size(); i++)
@@ -140,6 +142,7 @@ void VoxelOctoTree::init_octo_tree()
     if (plane_ptr_->is_plane_ == true)
     {
       octo_state_ = 0;
+      // new added
       if (temp_points_.size() > max_points_num_)
       {
         update_enable_ = false;
@@ -193,6 +196,7 @@ void VoxelOctoTree::cut_octo_tree()
         if (leaves_[i]->plane_ptr_->is_plane_)
         {
           leaves_[i]->octo_state_ = 0;
+          // new added
           if (leaves_[i]->temp_points_.size() > leaves_[i]->max_points_num_)
           {
             leaves_[i]->update_enable_ = false;
@@ -295,6 +299,8 @@ VoxelOctoTree *VoxelOctoTree::find_correspond(Eigen::Vector3d pw)
   xyz[2] = pw[2] > voxel_center_[2] ? 1 : 0;
   int leafnum = 4 * xyz[0] + 2 * xyz[1] + xyz[2];
 
+  // printf("leafnum: %d. \n", leafnum);
+
   return (leaves_[leafnum] != nullptr) ? leaves_[leafnum]->find_correspond(pw) : this;
 }
 
@@ -335,6 +341,10 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   cross_mat_list_.reserve(feats_down_size_);
   body_cov_list_.clear();
   body_cov_list_.reserve(feats_down_size_);
+
+  // build_residual_time = 0.0;
+  // ekf_time = 0.0;
+  // double t0 = omp_get_wtime();
 
   for (size_t i = 0; i < feats_down_body_->size(); i++)
   {
@@ -380,14 +390,17 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     }
     ptpl_list_.clear();
 
+    // double t1 = omp_get_wtime();
+
     BuildResidualListOMP(pv_list_, ptpl_list_);
+
+    // build_residual_time += omp_get_wtime() - t1;
 
     for (int i = 0; i < ptpl_list_.size(); i++)
     {
       total_residual += fabs(ptpl_list_[i].dis_to_plane_);
     }
     effct_feat_num_ = ptpl_list_.size();
-    if (effct_feat_num_ < 3) { state_ = state_propagat; return; }
     cout << "[ LIO ] Raw feature num: " << feats_undistort_->size() << ", downsampled feature num:" << feats_down_size_ 
          << " effective feature num: " << effct_feat_num_ << " average residual: " << total_residual / effct_feat_num_ << endl;
 
@@ -415,11 +428,26 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       J_nq.block<1, 3>(0, 3) = -ptpl_list_[i].normal_;
 
       M3D var;
+      // V3D normal_b = state_.rot_end.inverse() * ptpl_list_[i].normal_;
+      // V3D point_b = ptpl_list_[i].point_b_;
+      // double cos_theta = fabs(normal_b.dot(point_b) / point_b.norm());
+      // ptpl_list_[i].body_cov_ = ptpl_list_[i].body_cov_ * (1.0 / cos_theta) * (1.0 / cos_theta);
+
+      // point_w cov
+      // var = state_propagat.rot_end * extR_ * ptpl_list_[i].body_cov_ * (state_propagat.rot_end * extR_).transpose() +
+      //       state_propagat.cov.block<3, 3>(3, 3) + (-point_crossmat) * state_propagat.cov.block<3, 3>(0, 0) * (-point_crossmat).transpose();
+
+      // point_w cov (another_version)
+      // var = state_propagat.rot_end * extR_ * ptpl_list_[i].body_cov_ * (state_propagat.rot_end * extR_).transpose() +
+      //       state_propagat.cov.block<3, 3>(3, 3) - point_crossmat * state_propagat.cov.block<3, 3>(0, 0) * point_crossmat;
+
+      // point_body cov
       var = state_propagat.rot_end * extR_ * ptpl_list_[i].body_cov_ * (state_propagat.rot_end * extR_).transpose();
 
       double sigma_l = J_nq * ptpl_list_[i].plane_var_ * J_nq.transpose();
 
       R_inv(i) = 1.0 / (0.001 + sigma_l + ptpl_list_[i].normal_.transpose() * var * ptpl_list_[i].normal_);
+      // R_inv(i) = 1.0 / (sigma_l + ptpl_list_[i].normal_.transpose() * var * ptpl_list_[i].normal_);
 
       /*** calculate the Measuremnt Jacobian matrix H ***/
       V3D A(point_crossmat * state_.rot_end.transpose() * ptpl_list_[i].normal_);
@@ -432,8 +460,11 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     flg_EKF_converged = false;
     /*** Iterative Kalman Filter Update ***/
     MatrixXd K(DIM_STATE, effct_feat_num_);
+    // auto &&Hsub_T = Hsub.transpose();
     auto &&HTz = Hsub_T_R_inv * meas_vec;
+    // fout_dbg<<"HTz: "<<HTz<<endl;
     H_T_H.block<6, 6>(0, 0) = Hsub_T_R_inv * Hsub;
+    // EigenSolver<Matrix<double, 6, 6>> es(H_T_H.block<6,6>(0,0));
     MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H.block<DIM_STATE, DIM_STATE>(0, 0) + state_.cov.block<DIM_STATE, DIM_STATE>(0, 0).inverse()).inverse();
     G.block<DIM_STATE, 6>(0, 0) = K_1.block<DIM_STATE, 6>(0, 0) * H_T_H.block<6, 6>(0, 0);
     auto vec = state_propagat - state_;
@@ -454,14 +485,29 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     if (!EKF_stop_flg && (rematch_num >= 2 || (iterCount == config_setting_.max_iterations_ - 1)))
     {
       /*** Covariance Update ***/
+      // _state.cov = (I_STATE - G) * _state.cov;
       state_.cov.block<DIM_STATE, DIM_STATE>(0, 0) =
           (I_STATE.block<DIM_STATE, DIM_STATE>(0, 0) - G.block<DIM_STATE, DIM_STATE>(0, 0)) * state_.cov.block<DIM_STATE, DIM_STATE>(0, 0);
+      // total_distance += (_state.pos_end - position_last).norm();
       position_last_ = state_.pos_end;
       geoQuat_ = tf::createQuaternionMsgFromRollPitchYaw(euler_cur(0), euler_cur(1), euler_cur(2));
+
+      // VD(DIM_STATE) K_sum  = K.rowwise().sum();
+      // VD(DIM_STATE) P_diag = _state.cov.diagonal();
       EKF_stop_flg = true;
     }
     if (EKF_stop_flg) break;
   }
+
+  // double t2 = omp_get_wtime();
+  // scan_count++;
+  // ekf_time = t2 - t0 - build_residual_time;
+
+  // ave_build_residual_time = ave_build_residual_time * (scan_count - 1) / scan_count + build_residual_time / scan_count;
+  // ave_ekf_time = ave_ekf_time * (scan_count - 1) / scan_count + ekf_time / scan_count;
+
+  // cout << "[ Mapping ] ekf_time: " << ekf_time << "s, build_residual_time: " << build_residual_time << "s" << endl;
+  // cout << "[ Mapping ] ave_ekf_time: " << ave_ekf_time << "s, ave_build_residual_time: " << ave_build_residual_time << "s" << endl;
 }
 
 void VoxelMapManager::TransformLidar(const Eigen::Matrix3d rot, const Eigen::Vector3d t, const PointCloudXYZI::Ptr &input_cloud,
@@ -556,6 +602,7 @@ V3F VoxelMapManager::RGBFromVoxel(const V3D &input_point)
   int64_t ind = loc_xyz[0] + loc_xyz[1] + loc_xyz[2];
   uint k((ind + 100000) % 3);
   V3F RGB((k == 0) * 255.0, (k == 1) * 255.0, (k == 2) * 255.0);
+  // cout<<"RGB: "<<RGB.transpose()<<endl;
   return RGB;
 }
 
@@ -709,11 +756,13 @@ void VoxelMapManager::build_single_residual(pointWithVar &pv, const VoxelOctoTre
       }
       else
       {
+        // is_sucess = false;
         return;
       }
     }
     else
     {
+      // is_sucess = false;
       return;
     }
   }
@@ -879,6 +928,8 @@ void VoxelMapManager::mapSliding()
     std::cout<<RED<<"[DEBUG]: Last sliding length "<<(position_last_ - last_slide_position).norm()<<RESET<<"\n";
     return;
   }
+
+  //get global id now
   last_slide_position = position_last_;
   double t_sliding_start = omp_get_wtime();
   float loc_xyz[3];
@@ -887,6 +938,7 @@ void VoxelMapManager::mapSliding()
     loc_xyz[j] = position_last_[j] / config_setting_.max_voxel_size_;
     if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
   }
+  // VOXEL_LOCATION position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1], (int64_t)loc_xyz[2]);//discrete global
   clearMemOutOfMap((int64_t)loc_xyz[0] + config_setting_.half_map_size, (int64_t)loc_xyz[0] - config_setting_.half_map_size,
                     (int64_t)loc_xyz[1] + config_setting_.half_map_size, (int64_t)loc_xyz[1] - config_setting_.half_map_size,
                     (int64_t)loc_xyz[2] + config_setting_.half_map_size, (int64_t)loc_xyz[2] - config_setting_.half_map_size);
@@ -898,17 +950,22 @@ void VoxelMapManager::mapSliding()
 void VoxelMapManager::clearMemOutOfMap(const int& x_max,const int& x_min,const int& y_max,const int& y_min,const int& z_max,const int& z_min )
 {
   int delete_voxel_cout = 0;
+  // double delete_time = 0;
+  // double last_delete_time = 0;
   for (auto it = voxel_map_.begin(); it != voxel_map_.end(); )
   {
     const VOXEL_LOCATION& loc = it->first;
     bool should_remove = loc.x > x_max || loc.x < x_min || loc.y > y_max || loc.y < y_min || loc.z > z_max || loc.z < z_min;
     if (should_remove){
+      // last_delete_time = omp_get_wtime();
       delete it->second;
       it = voxel_map_.erase(it);
+      // delete_time += omp_get_wtime() - last_delete_time;
       delete_voxel_cout++;
     } else {
       ++it;
     }
   }
   std::cout<<RED<<"[DEBUG]: Delete "<<delete_voxel_cout<<" root voxels"<<RESET<<"\n";
+  // std::cout<<RED<<"[DEBUG]: Delete "<<delete_voxel_cout<<" voxels using "<<delete_time<<" s"<<RESET<<"\n";
 }

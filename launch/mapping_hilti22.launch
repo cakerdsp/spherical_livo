@@ -1,7 +1,7 @@
 <launch>
   <arg name="rviz" default="true" />
   <arg name="num_cameras" default="3" />
-  <arg name="config" default="$(find spherical_livo)/config/hilti22.yaml" />
+  <arg name="config" default="$(find spherical_livo)/config/HILTI22.yaml" />
   <arg name="cameras" default="$(find spherical_livo)/config/cameras_hilti22.yaml" />
   <arg name="output_dir" default="" />
   <arg name="use_sim_time" default="false" />
