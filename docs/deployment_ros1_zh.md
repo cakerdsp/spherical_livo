@@ -180,7 +180,7 @@ IMU 初始化计数在实现里按采样累计，并非相机帧数；提高到 
 
 着色采用 cake_slam 的世界点投影、原图双线性取色、BGR 转 RGB 流程，投影使用本项目的球面 LUT，支持超半球鱼眼。每次图像事件用该相机图像及对应事件位姿为最近一批 LIO 世界点着色，各相机顺序发布到同一 RGB 话题；不会把异步相机的旧图像套用到当前位姿。只发布投影有效的点，单目灰度输入会得到灰度 RGB。它是可视化点云，未增加稠密遮挡推理或完整历史彩色地图。RViz 的 30 秒累积仅用于显示。
 
-终端自动输出 LIO 和各相机 VIO 的分阶段耗时表，单位 ms，含当前事件值与累计均值；每张表最多每墙钟秒刷新一次，统计覆盖全部完成事件，不依赖 `/clock`。LIO 包含 IMU/去畸变、降采样/坐标变换、配准/EKF、地图维护、点云发布和总耗时。VIO 包含图像/候选筛选、patch 准备、线性化/求解/协方差、参考插入、VIO 总耗时及独立列出的 RGB/图像发布耗时。VIO 总耗时不含 RGB/图像发布；两者均不包括订阅回调中的图像解码、LiDAR 预处理和排队等待。LIO 初始化及不足点数的传播事件不计入 LIO 表；VIO 均值按相机分别累计。
+终端采用 FAST-LIVO2/cake_slam 风格的 ANSI 彩色加粗边框表格：蓝色边框和表头、LIO 青色数值、VIO 绿色数值。单位秒，显示各阶段当前耗时，底部单列 `Current Total Time` 与 `Average Total Time`；每张表最多每墙钟秒刷新一次，统计覆盖全部完成事件，不依赖 `/clock`。LIO 包含 IMU/去畸变、降采样/坐标变换、配准/EKF、地图维护、点云发布和总耗时。VIO 包含图像/候选筛选、patch 准备、线性化/求解/协方差、参考插入、VIO 总耗时及独立列出的 RGB/图像发布耗时。VIO 总耗时不含 RGB/图像发布；两者均不包括订阅回调中的图像解码、LiDAR 预处理和排队等待。LIO 初始化及不足点数的传播事件不计入 LIO 表；VIO 均值按相机分别累计。
 
 LIO 保留已有的 4 线程 OpenMP 点到平面匹配；着色使用最多 4 个线程逐点计算，少于 1024 点时串行。并行线程只写各自槽位，结果按原点序串行汇总；VIO 状态更新、相机事件与地图修改仍顺序执行。无订阅者时跳过对应图像绘制或点云着色，无需新增调参项。
 
@@ -190,7 +190,15 @@ LIO 保留已有的 4 线程 OpenMP 点到平面匹配；着色使用最多 4 �
 roslaunch spherical_livo mapping_private_mid360.launch rviz:=false
 ```
 
-HILTI22、M2DGR 和通用 `mapping.launch` 使用相同开关。RViz 不是必需进程，关闭其窗口不停止估计器。本次更新包含 C++ 修改，拉取后需要重新编译并 source 工作空间；使用 `catkin_make install` 的部署还需重新安装，以复制新的配置文件。
+HILTI22、M2DGR 和通用 `mapping.launch` 使用相同开关。RViz 不是必需进程，关闭其窗口不停止估计器。本次更新包含 C++ 修改，拉取后需要重新编译并 source 工作空间；使用 `catkin_make install` 的部署还需重新安装，以复制新的配置文件。重新启动 launch/RViz，已打开的旧 RViz 窗口不会自动重载配置。
+
+四个 launch 都显式加载同一个共享配置。RViz 中 `RGB Colored Cloud (30 s)` 默认订阅 `/spherical_livo/cloud_rgb` 并使用 RGB8；`VIO Camera 0` 和 `VIO Camera 1` 默认启用，分别订阅两路带球面采样点的处理图像，面板设为展开。相机 2–4 可在 Displays 中启用。若另一台机器仍显示旧配置，可以直接用当前 ROS 环境找到的包打开：
+
+```bash
+rviz -d "$(rospack find spherical_livo)/rviz_cfg/spherical_livo.rviz"
+```
+
+若这条命令仍打开旧内容，检查 `rospack find spherical_livo` 指向的工作空间是否是此次更新并 source 的版本。
 
 | 现象 | 处理 |
 | --- | --- |

@@ -115,7 +115,7 @@ class Node {
       }
     }
     display_=std::make_unique<spherical::Visualization>(nh_,cameras);
-    for(int i=0;i<count;++i)vio_timing_.emplace_back(vio_labels_);
+    for(int i=0;i<count;++i)vio_timing_.emplace_back(vio_labels_,4,"\033[1;32m");
     visual_=std::make_unique<spherical::VisualEstimator>(visual,std::move(cameras));
     const auto lidar_topic=parameter<std::string>(nh_,"common/lid_topic","/velodyne_points");
     if(pre_.lidar_type==AVIA)lidar_=nh_.subscribe<livox_ros_driver2::CustomMsg>(lidar_topic,16,[this](const livox_ros_driver2::CustomMsg::ConstPtr& msg){
@@ -174,10 +174,10 @@ class Node {
         const auto display_start=spherical::SteadyClock::now();
         display_->publish(frame.camera,target,frame.bgr,state_,recent_points_,stats,patches);
         const double display_ms=spherical::elapsedMs(display_start);
-        vio_timing_[frame.camera].record("VIO camera "+std::to_string(frame.camera)+
-          " patches="+std::to_string(stats.patches)+" cross="+std::to_string(stats.cross_camera)+
-          " updated="+std::to_string(stats.updated),target,
-          {stats.candidates_ms,stats.prepare_ms,stats.optimize_ms,stats.insert_ms,seconds*1000,display_ms});
+        vio_timing_[frame.camera].record("VIO Time - Camera "+std::to_string(frame.camera),target,
+          {stats.candidates_ms,stats.prepare_ms,stats.optimize_ms,stats.insert_ms,seconds*1000,display_ms},
+          "patches="+std::to_string(stats.patches)+" cross="+std::to_string(stats.cross_camera)+
+          " updated="+std::to_string(stats.updated));
       }
       while(!scan_ends_.empty()&&scan_ends_.front()<=time_+1e-9)scan_ends_.pop_front();
       if(!imu_.imu_need_init)publish();
@@ -276,7 +276,7 @@ class Node {
     if(geometry_->config_setting_.is_pub_plane_map_)geometry_->pubVoxelMap();
     sensor_msgs::PointCloud2 msg;pcl::toROSMsg(*world,msg);msg.header.frame_id="world";msg.header.stamp.fromSec(time_);cloud_pub_.publish(msg);
     const double publish_ms=spherical::elapsedMs(publish_start);
-    lio_timing_.record("LIO",target,{propagation_ms,filter_ms,registration_ms,map_ms,publish_ms,spherical::elapsedMs(start)});
+    lio_timing_.record("LIO Mapping Time",target,{propagation_ms,filter_ms,registration_ms,map_ms,publish_ms,spherical::elapsedMs(start)});
   }
   void publish(){
     nav_msgs::Odometry odom;odom.header.frame_id="world";odom.child_frame_id="imu";odom.header.stamp.fromSec(time_);
@@ -308,7 +308,7 @@ class Node {
   Preprocess pre_;ImuProcess imu_;StatesGroup state_;Mat Ril_;Vec til_;Vec measured_gyro_=Vec::Zero();
   std::unique_ptr<spherical::Visualization> display_;
   spherical::TimingTable<6> lio_timing_{{"IMU / deskew","Downsample / transform","Registration / EKF","Map build / update","Cloud / plane publish","Total LIO"}};
-  const std::array<const char*,6> vio_labels_{{"Image / candidates","Patch preparation","Linearize / solve / cov","Reference insertion","Total VIO","RGB / image publish"}};
+  const std::array<const char*,6> vio_labels_{{"Image / candidates","Patch preparation","Linearize / solve / cov","Reference insertion","Total VIO","RGB / image (outside total)"}};
   std::vector<spherical::TimingTable<6>> vio_timing_;
   std::unique_ptr<VoxelMapManager> geometry_;std::unique_ptr<spherical::VisualEstimator> visual_;
   pcl::VoxelGrid<PointType> downsample_;std::deque<Frame> frames_;std::deque<TimedPoint> points_;

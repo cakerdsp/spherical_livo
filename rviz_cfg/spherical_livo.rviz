@@ -1,3 +1,4 @@
+# Shared by all ROS1 mapping launch files. VIO images are annotated native-camera images.
 Panels:
   - Class: rviz/Displays
     Name: Displays
@@ -29,7 +30,7 @@ Visualization Manager:
       Radius: 0.03
       Reference Frame: <Fixed Frame>
     - Class: rviz/PointCloud2
-      Name: Camera colored cloud (30 s)
+      Name: RGB Colored Cloud (30 s)
       Enabled: true
       Value: true
       Topic: /spherical_livo/cloud_rgb
@@ -95,45 +96,65 @@ Visualization Manager:
         Axes Length: 0.6
         Axes Radius: 0.03
     - Class: rviz/Image
-      Name: Camera 0 spherical samples
+      Name: VIO Camera 0
       Enabled: true
       Value: true
       Image Topic: /spherical_livo/image/camera_0
       Transport Hint: raw
-      Queue Size: 1
+      Queue Size: 2
       Normalize Range: true
+      Min Value: 0
+      Max Value: 1
+      Median window: 5
+      Unreliable: false
     - Class: rviz/Image
-      Name: Camera 1 spherical samples
+      Name: VIO Camera 1
       Enabled: true
       Value: true
       Image Topic: /spherical_livo/image/camera_1
       Transport Hint: raw
-      Queue Size: 1
+      Queue Size: 2
       Normalize Range: true
+      Min Value: 0
+      Max Value: 1
+      Median window: 5
+      Unreliable: false
     - Class: rviz/Image
-      Name: Camera 2 spherical samples
+      Name: VIO Camera 2
       Enabled: false
       Value: false
       Image Topic: /spherical_livo/image/camera_2
       Transport Hint: raw
-      Queue Size: 1
+      Queue Size: 2
       Normalize Range: true
+      Min Value: 0
+      Max Value: 1
+      Median window: 5
+      Unreliable: false
     - Class: rviz/Image
-      Name: Camera 3 spherical samples
+      Name: VIO Camera 3
       Enabled: false
       Value: false
       Image Topic: /spherical_livo/image/camera_3
       Transport Hint: raw
-      Queue Size: 1
+      Queue Size: 2
       Normalize Range: true
+      Min Value: 0
+      Max Value: 1
+      Median window: 5
+      Unreliable: false
     - Class: rviz/Image
-      Name: Camera 4 spherical samples
+      Name: VIO Camera 4
       Enabled: false
       Value: false
       Image Topic: /spherical_livo/image/camera_4
       Transport Hint: raw
-      Queue Size: 1
+      Queue Size: 2
       Normalize Range: true
+      Min Value: 0
+      Max Value: 1
+      Median window: 5
+      Unreliable: false
   Tools:
     - Class: rviz/Interact
     - Class: rviz/MoveCamera
@@ -155,3 +176,19 @@ Visualization Manager:
 Window Geometry:
   Width: 1280
   Height: 800
+  Hide Left Dock: false
+  Hide Right Dock: false
+  Displays:
+    collapsed: false
+  Views:
+    collapsed: false
+  VIO Camera 0:
+    collapsed: false
+  VIO Camera 1:
+    collapsed: false
+  VIO Camera 2:
+    collapsed: false
+  VIO Camera 3:
+    collapsed: false
+  VIO Camera 4:
+    collapsed: false
