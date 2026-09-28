@@ -29,9 +29,24 @@ Visualization Manager:
       Radius: 0.03
       Reference Frame: <Fixed Frame>
     - Class: rviz/PointCloud2
-      Name: Recent cloud (30 s)
+      Name: Camera colored cloud (30 s)
       Enabled: true
       Value: true
+      Topic: /spherical_livo/cloud_rgb
+      Queue Size: 5
+      Alpha: 1
+      Decay Time: 30
+      Position Transformer: XYZ
+      Color Transformer: RGB8
+      Style: Points
+      Size (Pixels): 2
+      Size (m): 0.03
+      Selectable: false
+      Unreliable: false
+    - Class: rviz/PointCloud2
+      Name: Uncolored LIO cloud (30 s)
+      Enabled: false
+      Value: false
       Topic: /spherical_livo/cloud
       Queue Size: 5
       Alpha: 1
@@ -79,6 +94,46 @@ Visualization Manager:
         Alpha: 1
         Axes Length: 0.6
         Axes Radius: 0.03
+    - Class: rviz/Image
+      Name: Camera 0 spherical samples
+      Enabled: true
+      Value: true
+      Image Topic: /spherical_livo/image/camera_0
+      Transport Hint: raw
+      Queue Size: 1
+      Normalize Range: true
+    - Class: rviz/Image
+      Name: Camera 1 spherical samples
+      Enabled: true
+      Value: true
+      Image Topic: /spherical_livo/image/camera_1
+      Transport Hint: raw
+      Queue Size: 1
+      Normalize Range: true
+    - Class: rviz/Image
+      Name: Camera 2 spherical samples
+      Enabled: false
+      Value: false
+      Image Topic: /spherical_livo/image/camera_2
+      Transport Hint: raw
+      Queue Size: 1
+      Normalize Range: true
+    - Class: rviz/Image
+      Name: Camera 3 spherical samples
+      Enabled: false
+      Value: false
+      Image Topic: /spherical_livo/image/camera_3
+      Transport Hint: raw
+      Queue Size: 1
+      Normalize Range: true
+    - Class: rviz/Image
+      Name: Camera 4 spherical samples
+      Enabled: false
+      Value: false
+      Image Topic: /spherical_livo/image/camera_4
+      Transport Hint: raw
+      Queue Size: 1
+      Normalize Range: true
   Tools:
     - Class: rviz/Interact
     - Class: rviz/MoveCamera

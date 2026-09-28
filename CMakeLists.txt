@@ -27,7 +27,7 @@ target_link_libraries(spherical_lio PUBLIC ${catkin_LIBRARIES} ${PCL_LIBRARIES} 
 add_dependencies(spherical_lio ${catkin_EXPORTED_TARGETS})
 add_library(spherical_visual src/spherical_vio.cpp)
 target_link_libraries(spherical_visual PUBLIC spherical_geometry spherical_lio)
-add_executable(spherical_livo_node src/main.cpp)
+add_executable(spherical_livo_node src/main.cpp src/visualization.cpp)
 target_link_libraries(spherical_livo_node PRIVATE spherical_visual)
 add_dependencies(spherical_livo_node ${catkin_EXPORTED_TARGETS})
 if(CATKIN_ENABLE_TESTING)

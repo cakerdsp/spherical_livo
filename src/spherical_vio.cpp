@@ -1,4 +1,5 @@
 #include "spherical_vio.h"
+#include "timing.h"
 #include <Eigen/Cholesky>
 #include <Eigen/Eigenvalues>
 #include <Eigen/SVD>
@@ -156,7 +157,11 @@ bool VisualEstimator::linearize(const std::vector<Track>& tracks,const Image& im
 }
 
 VisualStats VisualEstimator::process(int id,const cv::Mat& gray,StatesGroup& state,
-                                     const std::vector<pointWithVar>& points,const VoxelMapManager& geometry) {
+                                     const std::vector<pointWithVar>& points,const VoxelMapManager& geometry,
+                                     std::vector<VisualPatch>* display) {
+  const auto start=SteadyClock::now();
+  if(display)display->clear();
+  std::vector<const Landmark*> final_landmarks;
   if(id<0||id>=int(cameras_.size()))throw std::out_of_range("camera id");
   Camera& camera=cameras_[id];auto image=std::make_shared<Image>(camera.atlas,gray);
   VisualStats stats;std::vector<const Landmark*> candidates;
@@ -169,6 +174,8 @@ VisualStats VisualEstimator::process(int id,const cv::Mat& gray,StatesGroup& sta
   }
   std::stable_sort(candidates.begin(),candidates.end(),[&](const Landmark* a,const Landmark* b){
     return (a->center-state.pos_end).squaredNorm()<(b->center-state.pos_end).squaredNorm();});
+  stats.candidates_ms=elapsedMs(start);
+  const auto optimization_start=SteadyClock::now();
   const StatesGroup prior=state;
   Eigen::LLT<Eigen::Matrix<double,18,18>> pll(0.5*(prior.cov+prior.cov.transpose()));
   if(pll.info()!=Eigen::Success)throw std::runtime_error("non-positive inertial covariance");
@@ -176,6 +183,7 @@ VisualStats VisualEstimator::process(int id,const cv::Mat& gray,StatesGroup& sta
   double log_gain=camera.last_log_gain;Linearization final_system;bool have_final=false;
   StatesGroup last_valid=prior;double last_valid_gain=log_gain;
   for(int scale: {4,2,1}) {
+    const auto prepare_start=SteadyClock::now();
     std::vector<Track> tracks;std::vector<std::pair<Vec,double>> footprints;
     for(const auto* p:candidates) {
       Track tr;if(!prepare(*p,*image,camera,state,scale,tr))continue;
@@ -190,6 +198,7 @@ VisualStats VisualEstimator::process(int id,const cv::Mat& gray,StatesGroup& sta
       if(overlap)continue;footprints.emplace_back(centre,radius);tracks.push_back(std::move(tr));
       if(tracks.size()>=size_t(config_.max_patches))break;
     }
+    stats.prepare_ms+=elapsedMs(prepare_start);
     if(tracks.size()<3)continue;
     for(int iteration=0;iteration<8;++iteration) {
       Linearization lin;if(!linearize(tracks,*image,camera,state,log_gain,prior,information,lin))break;
@@ -211,7 +220,11 @@ VisualStats VisualEstimator::process(int id,const cv::Mat& gray,StatesGroup& sta
     if(linearize(tracks,*image,camera,state,log_gain,prior,information,lin)){
       final_system=std::move(lin);have_final=true;stats.patches=tracks.size();stats.cross_camera=0;
       last_valid=state;last_valid_gain=log_gain;
-      for(const auto& t:tracks)if(t.point->camera!=id)++stats.cross_camera;
+      final_landmarks.clear();
+      for(const auto& t:tracks) {
+        if(t.point->camera!=id)++stats.cross_camera;
+        if(display)final_landmarks.push_back(t.point);
+      }
     }else{state=last_valid;log_gain=last_valid_gain;}
   }
   state=last_valid;log_gain=last_valid_gain;
@@ -226,12 +239,19 @@ VisualStats VisualEstimator::process(int id,const cv::Mat& gray,StatesGroup& sta
     } else state=prior;
   } else state=prior;
   stats.log_gain=camera.last_log_gain;
-  insert(id,image,state,points,geometry,std::exp(camera.last_log_gain));
+  stats.optimize_ms=elapsedMs(optimization_start)-stats.prepare_ms;
+  // Copy final accepted supports before insertion can evict reference landmarks.
+  if(display&&stats.updated)for(const auto* p:final_landmarks)
+    display->push_back({p->center,p->world,p->camera,false});
+  const auto insert_start=SteadyClock::now();
+  insert(id,image,state,points,geometry,std::exp(camera.last_log_gain),display);
+  stats.insert_ms=elapsedMs(insert_start);
   stats.map_points=map_.size();return stats;
 }
 
 void VisualEstimator::insert(int id,const std::shared_ptr<Image>& image,const StatesGroup& state,
-                             const std::vector<pointWithVar>& points,const VoxelMapManager& geometry,double gain) {
+                             const std::vector<pointWithVar>& points,const VoxelMapManager& geometry,double gain,
+                             std::vector<VisualPatch>* display) {
   const Camera& camera=cameras_[id];const Mat Rcw=camera.Rci*state.rot_end.transpose();
   const Vec tcw=camera.tci-Rcw*state.pos_end,origin=cameraCenter(camera,state);
   const double voxel=geometry.config_setting_.max_voxel_size_,spacing=voxel/4;
@@ -284,7 +304,9 @@ void VisualEstimator::insert(int id,const std::shared_ptr<Image>& image,const St
     constexpr int margin=64;
     const cv::Rect roi(int(std::floor(minx))-margin,int(std::floor(miny))-margin,
       int(std::ceil(maxx-minx))+2*margin+2,int(std::ceil(maxy-miny))+2*margin+2);
-    lm->image=image->crop(roi);occupied_.insert(key);map_.push_back(std::move(lm));
+    lm->image=image->crop(roi);
+    if(display)display->push_back({lm->center,lm->world,id,true});
+    occupied_.insert(key);map_.push_back(std::move(lm));
     inserted_directions.push_back(pc.normalized());
     if(++inserted>=config_.max_patches)break;
   }

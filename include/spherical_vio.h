@@ -20,18 +20,27 @@ struct VisualConfig {
   int max_patches = 120;
 };
 
+struct VisualPatch {
+  Vec center;
+  std::vector<Vec> samples;
+  int reference_camera = 0;
+  bool inserted = false;
+};
+
 struct VisualStats {
   size_t map_points = 0;
   int candidates = 0, patches = 0, cross_camera = 0, depth_rejected = 0;
   bool updated = false;
   double rms = 0, log_gain = 0;
+  double candidates_ms = 0, prepare_ms = 0, optimize_ms = 0, insert_ms = 0;
 };
 
 class VisualEstimator {
  public:
   VisualEstimator(VisualConfig config, std::vector<Camera> cameras);
   VisualStats process(int camera, const cv::Mat& gray, StatesGroup& state,
-                      const std::vector<pointWithVar>& points, const VoxelMapManager& geometry);
+                      const std::vector<pointWithVar>& points, const VoxelMapManager& geometry,
+                      std::vector<VisualPatch>* display = nullptr);
  private:
   struct Landmark {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -67,7 +76,8 @@ class VisualEstimator {
                  const Eigen::Matrix<double,18,18>& information, Linearization& result,
                  const std::vector<Eigen::MatrixXd>* fixed_whitening = nullptr) const;
   void insert(int camera_id, const std::shared_ptr<Image>& image, const StatesGroup& state,
-              const std::vector<pointWithVar>& points, const VoxelMapManager& geometry, double gain);
+              const std::vector<pointWithVar>& points, const VoxelMapManager& geometry, double gain,
+              std::vector<VisualPatch>* display);
   VisualConfig config_;
   std::vector<Camera> cameras_;
   std::vector<Vec> template_;

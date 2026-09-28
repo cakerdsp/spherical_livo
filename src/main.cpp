@@ -1,6 +1,9 @@
 #include "IMU_Processing.h"
 #include "preprocess.h"
 #include "spherical_vio.h"
+#include "visualization.h"
+#include "timing.h"
+#include <opencv2/imgproc.hpp>
 #include <cv_bridge/cv_bridge.h>
 #include <nav_msgs/Path.h>
 #include <sensor_msgs/CompressedImage.h>
@@ -55,7 +58,7 @@ spherical::CameraModel cameraModel(const ros::NodeHandle& nh,const std::string& 
   c.validate();return c;
 }
 
-struct Frame {double time;int camera;cv::Mat gray;};
+struct Frame {double time;int camera;cv::Mat gray,bgr;};
 struct TimedPoint {double time;PointType point;};
 
 class Node {
@@ -103,14 +106,16 @@ class Node {
       if(topic.empty())throw std::invalid_argument(key+"/img_topic is required");
       if(topic.size()>=11&&topic.substr(topic.size()-11)=="/compressed") {
         images_.push_back(nh_.subscribe<sensor_msgs::CompressedImage>(topic,8,[this,i](const sensor_msgs::CompressedImage::ConstPtr& msg){
-          receiveImage(i,msg->header.stamp.toSec(),cv_bridge::toCvCopy(msg,"mono8")->image);
+          receiveImage(i,msg->header.stamp.toSec(),cv_bridge::toCvCopy(msg,"bgr8")->image);
         }));
       }else{
         images_.push_back(nh_.subscribe<sensor_msgs::Image>(topic,8,[this,i](const sensor_msgs::Image::ConstPtr& msg){
-          receiveImage(i,msg->header.stamp.toSec(),cv_bridge::toCvCopy(msg,"mono8")->image);
+          receiveImage(i,msg->header.stamp.toSec(),cv_bridge::toCvCopy(msg,"bgr8")->image);
         }));
       }
     }
+    display_=std::make_unique<spherical::Visualization>(nh_,cameras);
+    for(int i=0;i<count;++i)vio_timing_.emplace_back(vio_labels_);
     visual_=std::make_unique<spherical::VisualEstimator>(visual,std::move(cameras));
     const auto lidar_topic=parameter<std::string>(nh_,"common/lid_topic","/velodyne_points");
     if(pre_.lidar_type==AVIA)lidar_=nh_.subscribe<livox_ros_driver2::CustomMsg>(lidar_topic,16,[this](const livox_ros_driver2::CustomMsg::ConstPtr& msg){
@@ -155,13 +160,24 @@ class Node {
       if(target>time_+1e-9)advance(target);
       while(!frames_.empty()&&std::abs(frames_.front().time-target)<=1e-9) {
         Frame frame=std::move(frames_.front());frames_.pop_front();
-        if(imu_.imu_need_init||!map_ready_)continue;
+        if(imu_.imu_need_init||!map_ready_) {
+          display_->publish(frame.camera,target,frame.bgr,state_,{},spherical::VisualStats{}, {},false);
+          continue;
+        }
+        std::vector<spherical::VisualPatch> patches;
         const auto start=std::chrono::steady_clock::now();
-        const auto stats=visual_->process(frame.camera,frame.gray,state_,recent_points_,*geometry_);
+        const auto stats=visual_->process(frame.camera,frame.gray,state_,recent_points_,*geometry_,
+                                         display_->wantsImage(frame.camera)?&patches:nullptr);
         const double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
         if(metrics_)metrics_<<std::setprecision(12)<<target<<','<<frame.camera<<','<<stats.candidates<<','<<stats.depth_rejected<<','
           <<stats.patches<<','<<stats.cross_camera<<','<<stats.map_points<<','<<stats.updated<<','<<stats.rms<<','<<stats.log_gain<<','<<seconds<<'\n';
-        ROS_INFO_THROTTLE(1,"Spherical VIO: camera=%d patches=%d cross_camera=%d map=%zu %.3fs",frame.camera,stats.patches,stats.cross_camera,stats.map_points,seconds);
+        const auto display_start=spherical::SteadyClock::now();
+        display_->publish(frame.camera,target,frame.bgr,state_,recent_points_,stats,patches);
+        const double display_ms=spherical::elapsedMs(display_start);
+        vio_timing_[frame.camera].record("VIO camera "+std::to_string(frame.camera)+
+          " patches="+std::to_string(stats.patches)+" cross="+std::to_string(stats.cross_camera)+
+          " updated="+std::to_string(stats.updated),target,
+          {stats.candidates_ms,stats.prepare_ms,stats.optimize_ms,stats.insert_ms,seconds*1000,display_ms});
       }
       while(!scan_ends_.empty()&&scan_ends_.front()<=time_+1e-9)scan_ends_.pop_front();
       if(!imu_.imu_need_init)publish();
@@ -173,12 +189,14 @@ class Node {
 
  private:
   static void release(VoxelOctoTree* cell){delete cell;}
-  void receiveImage(int camera,double stamp,const cv::Mat& gray){
+  void receiveImage(int camera,double stamp,const cv::Mat& bgr){
     const double t=stamp+offsets_[camera];
     if(t<=last_camera_[camera])throw std::runtime_error("camera timestamps repeated or moved backwards");
     last_camera_[camera]=t;
     auto pos=std::upper_bound(frames_.begin(),frames_.end(),t,[](double a,const Frame& b){return a<b.time;});
-    frames_.insert(pos,Frame{t,camera,gray.clone()});
+    cv::Mat gray;cv::cvtColor(bgr,gray,cv::COLOR_BGR2GRAY);
+    // cv::Mat keeps the decoded image alive; visualization never writes into it.
+    frames_.insert(pos,Frame{t,camera,std::move(gray),bgr});
   }
   void receiveCloud(double stamp,const PointCloudXYZI::Ptr& cloud){
     stamp+=lidar_offset_;if(stamp<=latest_scan_begin_)throw std::runtime_error("LiDAR timestamps repeated or moved backwards");
@@ -202,6 +220,7 @@ class Node {
     out->linear_acceleration.z=mix(a.linear_acceleration.z,b.linear_acceleration.z);return out;
   }
   void advance(double target){
+    const auto start=spherical::SteadyClock::now();
     LidarMeasureGroup measurement;measurement.lio_vio_flg=LIO;measurement.last_lio_update_time=time_;
     MeasureGroup group;group.lio_time=target;
     while(imu_queue_.size()>1&&imu_queue_[1]->header.stamp.toSec()<=time_)imu_queue_.pop_front();
@@ -223,15 +242,23 @@ class Node {
     measurement.measures.push_back(group);PointCloudXYZI::Ptr undistorted(new PointCloudXYZI);
     imu_.Process2(measurement,state_,undistorted);time_=target;
     if(imu_.imu_need_init||undistorted->size()<6)return;
+    const double propagation_ms=spherical::elapsedMs(start);
+    const auto filter_start=spherical::SteadyClock::now();
     PointCloudXYZI::Ptr down(new PointCloudXYZI),world(new PointCloudXYZI);
     downsample_.setInputCloud(undistorted);downsample_.filter(*down);if(down->size()<6)return;
     geometry_->state_=state_;geometry_->feats_down_body_=down;geometry_->feats_down_size_=down->size();
     for(const auto& p:down->points){PointType q=p;const Vec w=state_.rot_end*(Ril_*Vec(p.x,p.y,p.z)+til_)+state_.pos_end;
       q.x=w.x();q.y=w.y();q.z=w.z();world->push_back(q);}
     geometry_->feats_down_world_=world;
+    const double filter_ms=spherical::elapsedMs(filter_start);
+    const auto initialization_start=spherical::SteadyClock::now();
     if(!map_ready_){geometry_->BuildVoxelMap();map_ready_=true;}
+    const double initialization_ms=spherical::elapsedMs(initialization_start);
+    const auto registration_start=spherical::SteadyClock::now();
     StatesGroup prior=state_;geometry_->StateEstimation(prior);state_=geometry_->state_;
     state_.cov=0.5*(state_.cov+state_.cov.transpose()).eval();
+    const double registration_ms=spherical::elapsedMs(registration_start);
+    const auto map_start=spherical::SteadyClock::now();
     world->clear();
     for(size_t i=0;i<down->size();++i){
       auto& pv=geometry_->pv_list_[i];const auto& p=down->points[i];const Vec pi=Ril_*Vec(p.x,p.y,p.z)+til_;
@@ -244,8 +271,12 @@ class Node {
     }
     geometry_->UpdateVoxelMap(geometry_->pv_list_);recent_points_=geometry_->pv_list_;
     if(geometry_->config_setting_.map_sliding_en)geometry_->mapSliding();
+    const double map_ms=initialization_ms+spherical::elapsedMs(map_start);
+    const auto publish_start=spherical::SteadyClock::now();
     if(geometry_->config_setting_.is_pub_plane_map_)geometry_->pubVoxelMap();
     sensor_msgs::PointCloud2 msg;pcl::toROSMsg(*world,msg);msg.header.frame_id="world";msg.header.stamp.fromSec(time_);cloud_pub_.publish(msg);
+    const double publish_ms=spherical::elapsedMs(publish_start);
+    lio_timing_.record("LIO",target,{propagation_ms,filter_ms,registration_ms,map_ms,publish_ms,spherical::elapsedMs(start)});
   }
   void publish(){
     nav_msgs::Odometry odom;odom.header.frame_id="world";odom.child_frame_id="imu";odom.header.stamp.fromSec(time_);
@@ -275,6 +306,10 @@ class Node {
   ros::NodeHandle nh_;ros::Subscriber lidar_,imu_sub_;std::vector<ros::Subscriber> images_;
   ros::Publisher odom_,cloud_pub_,path_pub_;nav_msgs::Path path_;
   Preprocess pre_;ImuProcess imu_;StatesGroup state_;Mat Ril_;Vec til_;Vec measured_gyro_=Vec::Zero();
+  std::unique_ptr<spherical::Visualization> display_;
+  spherical::TimingTable<6> lio_timing_{{"IMU / deskew","Downsample / transform","Registration / EKF","Map build / update","Cloud / plane publish","Total LIO"}};
+  const std::array<const char*,6> vio_labels_{{"Image / candidates","Patch preparation","Linearize / solve / cov","Reference insertion","Total VIO","RGB / image publish"}};
+  std::vector<spherical::TimingTable<6>> vio_timing_;
   std::unique_ptr<VoxelMapManager> geometry_;std::unique_ptr<spherical::VisualEstimator> visual_;
   pcl::VoxelGrid<PointType> downsample_;std::deque<Frame> frames_;std::deque<TimedPoint> points_;
   std::deque<sensor_msgs::Imu::ConstPtr> imu_queue_;std::deque<double> scan_ends_;

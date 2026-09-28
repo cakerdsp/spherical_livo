@@ -167,7 +167,22 @@ IMU 初始化计数在实现里按采样累计，并非相机帧数；提高到 
 - `trajectory.txt`：`timestamp tx ty tz qx qy qz qw`，输出 **IMU** 位姿。
 - `visual.csv`：相机编号、有效 patch、跨相机参考计数、是否更新、残差及耗时。
 
-ROS 输出为 `/spherical_livo/odometry`、`/spherical_livo/path`、`/spherical_livo/cloud`，固定坐标系 `world`。所有启动入口默认开启 RViz，共用 `rviz_cfg/spherical_livo.rviz`，已配置 `world` 坐标系、点云、轨迹和当前 IMU 位姿。点云显示累积最近 30 秒发布的数据，不是完整历史地图；显示累积不会影响算法地图。
+所有启动入口默认开启 RViz，共用 `rviz_cfg/spherical_livo.rviz`，固定坐标系 `world`。
+
+| 话题 | 内容与默认显示 |
+| --- | --- |
+| `/spherical_livo/cloud_rgb` | `PointXYZRGB`，默认启用 RGB8 着色，累积最近 30 秒 |
+| `/spherical_livo/cloud` | 原始 LIO 强度点云；RViz 默认关闭，需要查看相机视野外的点时启用 |
+| `/spherical_livo/image/camera_N` | 原图及实际球面 patch 采样位置；默认显示相机 0、1，相机 2–4 在 Displays 中勾选 |
+| `/spherical_livo/path`、`/spherical_livo/odometry` | 轨迹与当前 IMU 位姿 |
+
+图像小点是球面样本通过当前位姿投影回原图的位置，小圆是 patch 中心。绿色表示最终被接受的同相机参考，紫色表示跨相机参考，黄色表示本帧新建参考（未参与本帧更新）。无有效视觉更新时不会画出“已接受”的跟踪点。初始化期间也会发布收到的图像并标注 initializing。
+
+着色采用 cake_slam 的世界点投影、原图双线性取色、BGR 转 RGB 流程，投影使用本项目的球面 LUT，支持超半球鱼眼。每次图像事件用该相机图像及对应事件位姿为最近一批 LIO 世界点着色，各相机顺序发布到同一 RGB 话题；不会把异步相机的旧图像套用到当前位姿。只发布投影有效的点，单目灰度输入会得到灰度 RGB。它是可视化点云，未增加稠密遮挡推理或完整历史彩色地图。RViz 的 30 秒累积仅用于显示。
+
+终端自动输出 LIO 和各相机 VIO 的分阶段耗时表，单位 ms，含当前事件值与累计均值；每张表最多每墙钟秒刷新一次，统计覆盖全部完成事件，不依赖 `/clock`。LIO 包含 IMU/去畸变、降采样/坐标变换、配准/EKF、地图维护、点云发布和总耗时。VIO 包含图像/候选筛选、patch 准备、线性化/求解/协方差、参考插入、VIO 总耗时及独立列出的 RGB/图像发布耗时。VIO 总耗时不含 RGB/图像发布；两者均不包括订阅回调中的图像解码、LiDAR 预处理和排队等待。LIO 初始化及不足点数的传播事件不计入 LIO 表；VIO 均值按相机分别累计。
+
+LIO 保留已有的 4 线程 OpenMP 点到平面匹配；着色使用最多 4 个线程逐点计算，少于 1024 点时串行。并行线程只写各自槽位，结果按原点序串行汇总；VIO 状态更新、相机事件与地图修改仍顺序执行。无订阅者时跳过对应图像绘制或点云着色，无需新增调参项。
 
 已经部署的机器若尚未安装 RViz，执行 `sudo apt install ros-noetic-rviz`。无桌面环境时关闭可视化：
 
@@ -175,7 +190,7 @@ ROS 输出为 `/spherical_livo/odometry`、`/spherical_livo/path`、`/spherical_
 roslaunch spherical_livo mapping_private_mid360.launch rviz:=false
 ```
 
-HILTI22、M2DGR 和通用 `mapping.launch` 使用相同开关。RViz 不是必需进程，关闭其窗口不停止估计器。源码工作空间拉取本次配置更新后无需重新编译 C++；使用 `catkin_make install` 的部署需重新安装，以复制新的配置文件。
+HILTI22、M2DGR 和通用 `mapping.launch` 使用相同开关。RViz 不是必需进程，关闭其窗口不停止估计器。本次更新包含 C++ 修改，拉取后需要重新编译并 source 工作空间；使用 `catkin_make install` 的部署还需重新安装，以复制新的配置文件。
 
 | 现象 | 处理 |
 | --- | --- |
