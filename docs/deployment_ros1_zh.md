@@ -201,3 +201,12 @@ rviz -d $(rospack find spherical_livo)/rviz_cfg/spherical_livo.rviz
 新增 Multi-camera VIO Time 的 All Cameras (secs) 用来检查两路合计是否达到 0.030 s；Group Total (secs) 还包含着色和图像发布。Current Total Time 已包含原表遗漏的图像准备与绘图，不能只比较内部 computeJacobian 一行。
 
 本次没有降低 patch_samples、max_patches 或金字塔层数，没有跳过相机／帧来满足时间指标；没有本机性能测量结果。采样、准备、参考构造使用自动至多 8 个工作线程，沿用 cake_slam 的结果分槽与顺序提交方法，状态和相机仍顺序更新。IMU、LIO、同步逻辑与 YAML 未修改。
+
+
+### 全局选点与几何前移
+
+无需改 YAML。每个相机分别以当前原图 Shi–Tomasi 分数，对当前局部地图视野内全部合格候选取 Top-K；不再每格只留一个点。K 沿用 visual/max_patches（私有数据每路默认 120）。新点同样从雷达候选全局选取剩余名额，只排除完全相同的已有三维位置。不是遍历整个历史地图，也不是两路合并争抢 120 个名额。旧 grid_size/grid_n_height 参数不再控制视觉选点。
+
+表内 Eligible Candidates → Selected Candidates → Accepted Patches 分别是有效候选、构造配额内候选和最终优化点。失败后不继续补满，且全局纹理排序可能集中于高纹理区域，不能据此承诺点数增加。中心单点光度误差没有设为排名依据，完整球面 patch 光度检查保留。
+
+各采样方向的几何检查和粗尺度深度一致性先于图像亮度采样；粗细尺度复用几何计算，像素支持和饱和检查仍保留。少量 patch 自动使用更细的并行任务粒度，无新调参项。IMU、LIO、主节点同步和 IEKF 更新公式未改。仅基本源码检查，未编译、回放，双路 30 ms 仍需实测。

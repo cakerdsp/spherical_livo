@@ -23,13 +23,14 @@ which is included as part of this source code package.
 
 struct SphericalWarp
 {
-  std::vector<V3D> world;
+  std::vector<V3D> world, bearings;
+  std::vector<double> reference_radii;
   std::vector<spherical::SamplingKernel> kernels;
   std::vector<spherical::Sample> current;
   M3D pose_R = M3D::Identity();
   V3D pose_t = V3D::Zero();
   double cover = 0;
-  bool ready = false;
+  bool geometry_ready = false, ready = false;
   std::vector<float> reference;
 };
 
@@ -87,28 +88,25 @@ public:
 class VIOManager
 {
 public:
-  int grid_size;
+  int grid_size; // upstream parameter compatibility; global selection ignores grids
   vk::AbstractCamera *cam;
 
   StatesGroup *state;
   StatesGroup *state_propagat;
   M3D Rli, Rci, Rcl, Rcw, Jdphi_dR, Jdp_dt, Jdp_dR;
   V3D Pli, Pci, Pcl, Pcw;
-  vector<int> grid_num;
-  vector<int> map_index;
-  vector<int> border_flag;
   vector<int> update_flag;
-  vector<float> map_dist;
-  vector<float> scan_value;
   vector<float> patch_buffer;
   bool normal_en, inverse_composition_en, exposure_estimate_en, raycast_en, has_ref_patch_cache;
   bool ncc_en = false, colmap_output_en = false;
 
-  int width, height, grid_n_width, grid_n_height, length;
+  int width, height, grid_n_height; // legacy grid_n_height is not a selection quota
   double image_resize_factor;
   double fx, fy, cx, cy;
   int patch_pyrimid_level, patch_size, patch_size_total, patch_size_half, border, warp_len;
   int max_iterations, total_points;
+  int candidate_count = 0, selected_candidate_count = 0;
+  std::set<std::array<double,3>> visible_map_positions;
 
   double img_point_cov, outlier_threshold, ncc_thre;
   
@@ -144,17 +142,8 @@ public:
   unordered_map<VOXEL_LOCATION, VOXEL_POINTS *> feat_map;
   unordered_map<VOXEL_LOCATION, int> sub_feat_map; 
 
-  vector<VisualPoint *> retrieve_voxel_points;
-  vector<pointWithVar> append_voxel_points;
   FramePtr new_frame_;
   cv::Mat img_cp, img_rgb, img_test;
-
-  enum CellType
-  {
-    TYPE_MAP = 1,
-    TYPE_POINTCLOUD,
-    TYPE_UNKNOWN
-  };
 
   struct CameraView {
     std::shared_ptr<SphericalCamera> camera;
@@ -174,7 +163,10 @@ public:
   bool getColorFromCamera(int id,const V3D& world,V3F& color,double blind);
   bool refreshPlane(VisualPoint& pt);
   bool buildSphericalReference(Feature& feature);
+  bool prepareSphericalGeometry(const Feature& feature,int level,SphericalWarp& warp) const;
+  bool sampleSphericalWarp(const Feature& feature,SphericalWarp& warp) const;
   bool prepareSphericalWarp(const Feature& feature,int level,SphericalWarp& warp) const;
+  bool prepareSphericalPyramid(const Feature& feature,std::vector<SphericalWarp>& warps) const;
   bool depthConsistent(const VisualPoint& pt,const SphericalWarp& warp) const;
   VIOManager();
   ~VIOManager();
