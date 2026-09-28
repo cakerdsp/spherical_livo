@@ -1,0 +1,12 @@
+<launch>
+  <arg name="config" />
+  <arg name="cameras" />
+  <arg name="output_dir" default="" />
+  <arg name="use_sim_time" default="false" />
+  <param name="/use_sim_time" value="$(arg use_sim_time)" />
+  <node pkg="spherical_livo" type="spherical_livo_node" name="spherical_livo" output="screen">
+    <rosparam command="load" file="$(arg config)" />
+    <rosparam command="load" file="$(arg cameras)" />
+    <param name="output_dir" value="$(arg output_dir)" />
+  </node>
+</launch>

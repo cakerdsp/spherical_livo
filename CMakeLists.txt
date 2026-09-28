@@ -1,147 +1,49 @@
-cmake_minimum_required(VERSION 2.8.3)
-project(fast_livo)
-
-set(CMAKE_BUILD_TYPE "Release")
-message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
-
+cmake_minimum_required(VERSION 3.10)
+project(spherical_livo VERSION 0.1.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-
-# Set common compile options
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread -fexceptions")
-
-# Specific settings for Debug build
-set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -g")
-
-# Detect CPU architecture
-message(STATUS "Current CPU architecture: ${CMAKE_SYSTEM_PROCESSOR}")
-
-# Specific settings for Release build
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|aarch64|ARM|AARCH64)")
-  if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
-    # 64-bit ARM optimizations (e.g., RK3588 and Jetson Orin NX)
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -mcpu=native -mtune=native -ffast-math")
-    message(STATUS "Using 64-bit ARM optimizations: -O3 -mcpu=native -mtune=native -ffast-math")
-  else()
-    # 32-bit ARM optimizations with NEON support
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -mcpu=native -mtune=native -mfpu=neon -ffast-math")
-    message(STATUS "Using 32-bit ARM optimizations: -O3 -mcpu=native -mtune=native -mfpu=neon -ffast-math")
-  endif()
-  add_definitions(-DARM_ARCH)
-else()
-  # x86-64 (Intel/AMD) optimizations
-  set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native -mtune=native -funroll-loops") #-flto
-  message(STATUS "Using general x86 optimizations: -O3 -march=native -mtune=native -funroll-loops") 
-  add_definitions(-DX86_ARCH)
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
-
-# Define project root directory
-add_definitions(-DROOT_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/\")
-
-# Detect CPU core count for potential multithreading optimization
-include(ProcessorCount)
-ProcessorCount(N)
-message(STATUS "Processor count: ${N}")
-
-# Set the number of cores for multithreading
-if(N GREATER 4)
-  math(EXPR PROC_NUM "4")
-  add_definitions(-DMP_EN -DMP_PROC_NUM=${PROC_NUM})
-  message(STATUS "Multithreading enabled. Cores: ${PROC_NUM}")
-elseif(N GREATER 1)
-  math(EXPR PROC_NUM "${N}")
-  add_definitions(-DMP_EN -DMP_PROC_NUM=${PROC_NUM})
-  message(STATUS "Multithreading enabled. Cores: ${PROC_NUM}")
-else()
-  add_definitions(-DMP_PROC_NUM=1)
-  message(STATUS "Single core detected. Multithreading disabled.")
-endif()
-
-# Check for OpenMP support
-find_package(OpenMP QUIET)
-if(OpenMP_CXX_FOUND)
-  message(STATUS "OpenMP found")
-  add_compile_options(${OpenMP_CXX_FLAGS})
-else()
-  message(STATUS "OpenMP not found, proceeding without it")
-endif()
-
-# Check for mimalloc support
-find_package(mimalloc QUIET)
-if(mimalloc_FOUND)
-  message(STATUS "mimalloc found")
-else()
-  message(STATUS "mimalloc not found, proceeding without it")
-endif()
-
-# Find catkin and required dependencies
-find_package(catkin REQUIRED COMPONENTS
-  geometry_msgs
-  nav_msgs
-  sensor_msgs
-  roscpp
-  rospy
-  std_msgs
-  pcl_ros
-  tf
-  message_generation
-  eigen_conversions
-  vikit_common
-  vikit_ros
-  cv_bridge
-  image_transport
-)
-
+find_package(catkin REQUIRED COMPONENTS roscpp sensor_msgs geometry_msgs nav_msgs
+  visualization_msgs pcl_ros pcl_conversions tf cv_bridge livox_ros_driver2)
 find_package(Eigen3 REQUIRED)
-find_package(PCL REQUIRED)
-find_package(OpenCV REQUIRED)
-find_package(Sophus REQUIRED)
-find_package(Boost REQUIRED COMPONENTS thread)
-
-set(Sophus_LIBRARIES libSophus.so)
-
-# Define the catkin package
-catkin_package(
-  CATKIN_DEPENDS geometry_msgs nav_msgs roscpp rospy std_msgs message_runtime cv_bridge vikit_common vikit_ros image_transport
-  DEPENDS EIGEN3 PCL OpenCV Sophus
-)
-
-# Include directories for dependencies
-include_directories(
-  ${catkin_INCLUDE_DIRS}
-  ${EIGEN3_INCLUDE_DIR}
-  ${PCL_INCLUDE_DIRS}
-  ${OpenCV_INCLUDE_DIRS}
-  ${Sophus_INCLUDE_DIRS}
-  include
-)
-
-# Add libraries
-add_library(vio src/vio.cpp src/frame.cpp src/visual_point.cpp)
-add_library(lio src/voxel_map.cpp)
-add_library(pre src/preprocess.cpp)
-add_library(imu_proc src/IMU_Processing.cpp)
-add_library(laser_mapping src/LIVMapper.cpp)
-
-# Add the main executable
-add_executable(fastlivo_mapping src/main.cpp)
-
-# Link libraries to the executable
-target_link_libraries(fastlivo_mapping
-  laser_mapping
-  vio
-  lio
-  pre
-  imu_proc
-  ${catkin_LIBRARIES}
-  ${PCL_LIBRARIES}
-  ${OpenCV_LIBRARIES}
-  ${Sophus_LIBRARIES}
-  ${Boost_LIBRARIES}
-)
-
-# Link mimalloc if found
-if(mimalloc_FOUND)
-  target_link_libraries(fastlivo_mapping mimalloc)
+find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
+find_package(PCL REQUIRED COMPONENTS common filters io)
+find_package(OpenMP REQUIRED)
+catkin_package(INCLUDE_DIRS include LIBRARIES spherical_geometry spherical_visual spherical_lio
+  CATKIN_DEPENDS roscpp sensor_msgs geometry_msgs nav_msgs visualization_msgs pcl_ros
+  pcl_conversions tf cv_bridge livox_ros_driver2 DEPENDS Eigen3 OpenCV PCL)
+include_directories(include ${catkin_INCLUDE_DIRS} ${EIGEN3_INCLUDE_DIRS}
+  ${EIGEN3_INCLUDE_DIR} ${OpenCV_INCLUDE_DIRS} ${PCL_INCLUDE_DIRS})
+add_definitions(${PCL_DEFINITIONS})
+add_compile_options(-Wall -Wextra -Wno-unused-parameter)
+add_library(spherical_geometry src/spherical.cpp)
+target_link_libraries(spherical_geometry PUBLIC Eigen3::Eigen ${OpenCV_LIBRARIES})
+add_library(spherical_lio src/voxel_map.cpp src/IMU_Processing.cpp src/preprocess.cpp)
+target_compile_definitions(spherical_lio PRIVATE MP_EN MP_PROC_NUM=4 ROOT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/")
+target_link_libraries(spherical_lio PUBLIC ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} OpenMP::OpenMP_CXX)
+add_dependencies(spherical_lio ${catkin_EXPORTED_TARGETS})
+add_library(spherical_visual src/spherical_vio.cpp)
+target_link_libraries(spherical_visual PUBLIC spherical_geometry spherical_lio)
+add_executable(spherical_livo_node src/main.cpp)
+target_link_libraries(spherical_livo_node PRIVATE spherical_visual)
+add_dependencies(spherical_livo_node ${catkin_EXPORTED_TARGETS})
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(spherical_geometry_test tests/spherical_geometry_test.cpp)
+  if(TARGET spherical_geometry_test)
+    target_link_libraries(spherical_geometry_test spherical_geometry)
+  endif()
+  catkin_add_gtest(spherical_integration_test tests/spherical_integration_test.cpp)
+  if(TARGET spherical_integration_test)
+    target_link_libraries(spherical_integration_test spherical_visual)
+  endif()
 endif()
+install(TARGETS spherical_geometry spherical_lio spherical_visual spherical_livo_node
+  ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+  LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+  RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
+install(DIRECTORY include/ DESTINATION ${CATKIN_GLOBAL_INCLUDE_DESTINATION})
+install(DIRECTORY config launch docs DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})
+install(FILES README.md LICENSE DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})

@@ -1,100 +1,78 @@
+# Calibration derived from Hilti-Research/hilti-slam-challenge-2022, CC BY-NC-SA 3.0.
+# Attribution and exact source files: docs/calibration_sources.md.
+# Internal camera0..4 map to physical C0,C3,C4,C1,C2; first N are active.
+# T_CL = T_CI * T_IL; t_corrected = t_image + timeshift_cam_imu.
+# Static untested defaults. Each camera uses its own official calibration.
 common:
-  img_topic: "/alphasense/cam0/image_raw"
+  num_cameras: 3
   lid_topic: "/hesai/pandar"
   imu_topic: "/alphasense/imu"
-  img_en: 1
-  lidar_en: 1
-  ros_driver_bug_fix: false
-
+cameras:
+  camera0:
+    img_topic: "/alphasense/cam0/image_raw"
+    camera_ns: "camera0"
+    Rcl: [-0.9999264200621176, -0.006708021451800439, 0.01010727015365992, -0.010091197021688258, -0.002425643641803532, -0.9999461405473755, 0.00673217679702115, -0.9999745590269407, 0.0023577731969991467]
+    Pcl: [-0.05497620466498117, 0.0675401455352659, -0.05205992090186603]
+    time_offset: 0.0019071204237431304
+  camera1:
+    img_topic: "/alphasense/cam3/image_raw"
+    camera_ns: "camera1"
+    Rcl: [-0.007396041673023157, 0.9998916894135631, -0.01272430781071447, 0.002363530935315569, -0.01270714046408309, -0.9999164676625464, -0.9999698556902047, -0.007425498159515405, -0.002269292399476633]
+    Pcl: [-0.0013880731573544423, 0.06618357503169384, -0.06561545010336364]
+    time_offset: 0.0018128742099424312
+  camera2:
+    img_topic: "/alphasense/cam4/image_raw"
+    camera_ns: "camera2"
+    Rcl: [0.000942427662931895, -0.9999880402484476, 0.004799082221662863, 0.0021900897852221157, -0.004797008865106434, -0.9999860960096802, 0.9999971576643774, 0.0009529249803788974, 0.0021855427584387965]
+    Pcl: [0.005160367447034718, 0.0717138089488167, -0.06644965352255408]
+    time_offset: 0.0017123033924705262
+  camera3:
+    img_topic: "/alphasense/cam1/image_raw"
+    camera_ns: "camera3"
+    Rcl: [-0.9999840642813064, -0.0016556126470597954, 0.005397233569448934, -0.005395690615039778, -0.0009350089535379302, -0.9999850060281122, 0.0016606342845620903, -0.9999981923508761, 0.0009260608798763448]
+    Pcl: [0.05377943234387279, 0.06838681969745619, -0.0515450915924247]
+    time_offset: 0.001901867458041627
+  camera4:
+    img_topic: "/alphasense/cam2/image_raw"
+    camera_ns: "camera4"
+    Rcl: [-0.0042340516721277015, -0.9999897552434941, 0.0016006918802386892, 0.9999871881804255, -0.004238470700886935, -0.0027674611333545654, 0.0027742172670246527, 0.0015889537990238962, 0.9999948894591316]
+    Pcl: [-0.007986043407087256, 0.0007666033304289197, -0.08909935434931215]
+    time_offset: 0.001939579925335353
 extrin_calib:
-  # Hilti-2022
-  extrinsic_T: [-0.001, -0.00855, 0.055] 
+  extrinsic_T: [-0.001, -0.00855, 0.055]
   extrinsic_R: [0, -1, 0, -1, 0, 0, 0, 0, -1]
-  
-  # Hilti-2023
-  # extrinsic_T: [-0.006730146149038548, -0.006897049862999071, 0.049898628062256645] 
-  # extrinsic_R: [0.006609639848469365, -0.9999773650294649, 0.0012578115132016717, 
-  #               -0.9999762249571927, -0.006612093869054189, -0.0019569708811106104, 
-  #               0.001965243352927244, -0.0012448467359610184, -0.9999972940839232]
-
-  # Hilti
-  Rcl: [ -0.999926,  -0.00670802, 0.0101073,
-         -0.0100912, -0.00242564, -0.999946,
-          0.00673218,-0.999975, 0.00235777 ]
-  Pcl: [ -0.0549762, 0.0675401, -0.0520599 ]
-
 time_offset:
   imu_time_offset: 0.0
-  img_time_offset: 0.0
-  exposure_time_init: 0.0
-
+  lidar_time_offset: 0.0
 preprocess:
-  hilti_en: true
-  point_filter_num: 1
-  filter_size_surf: 0.1 # 0.2
-  lidar_type: 5 # HesaiXT32
+  lidar_type: 5
   scan_line: 32
-  blind: 0.6 # 0.1 0.3
- 
-vio:
-  max_iterations: 5
-  outlier_threshold: 500
-  img_point_cov: 1000
-  patch_size: 8
-  patch_pyrimid_level: 4
-  normal_en: true
-  raycast_en: false
-  inverse_composition_en: false
-  exposure_estimate_en: true
-  inv_expo_cov: 0.1
-
+  point_filter_num: 3
+  blind: 0.6
+  filter_size_surf: 0.1
+visual:
+  patch_radius_deg: 1.0
+  patch_samples: 48
+  max_patches: 120
 imu:
-  imu_en: true
-  imu_int_frame: 30
-  acc_cov: 0.5 # 0.1
+  imu_int_frame: 100
+  acc_cov: 0.5
   gyr_cov: 0.01
-  b_acc_cov: 0.0001 # 0.1
-  b_gyr_cov: 0.0001 # 0.1
-
+  b_acc_cov: 0.0001
+  b_gyr_cov: 0.0001
 lio:
   max_iterations: 5
   dept_err: 0.02
   beam_err: 0.05
-  min_eigen_value: 0.0001 # 0.0025
-  voxel_size: 0.4
+  sigma_num: 3.0
+  min_eigen_value: 0.001
+  voxel_size: 0.5
   max_layer: 2
   max_points_num: 100
   layer_init_num: [5, 5, 5, 5, 5]
-
-local_map:  
-  map_sliding_en: false
+local_map:
+  map_sliding_en: true
   half_map_size: 100
-  sliding_thresh: 8
-
-uav:
-  imu_rate_odom: false
-  gravity_align_en: false
-
+  sliding_thresh: 8.0
 publish:
-  dense_map_en: true
-  pub_effect_point_en: false 
   pub_plane_en: false
-  pub_scan_num: 1
-  blind_rgb_points: 0.0
-
-evo:
-  seq_name: "exp09_cupola"
-  pose_output_en: true
-
-pcd_save:
-  pcd_save_en: false
-  type: 0 # 0: World Frame, 1: Body Frame;
-  colmap_output_en: false # need to set interval = -1
-  filter_size_pcd: 0.15
-  interval: -1
-  # how many LiDAR frames saved in each pcd file;
-  # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.
-
-image_save:
-  img_save_en: false
-  interval: 1

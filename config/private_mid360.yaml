@@ -1,0 +1,59 @@
+# Private MID360 + two raw MEI views. Calibration from cake_slam, unchanged.
+# Type 8 is Livox PointCloud2 here; type 7 remains upstream Robosense.
+# timestamp: absolute ns, or offset_time: ns relative to header.
+# Defaults are reasoned starting values, not replay-tuned. See docs/deployment_ros1_zh.md.
+common:
+  num_cameras: 2
+  lid_topic: "/livox/lidar"
+  imu_topic: "/livox/imu"
+cameras:
+  camera0:
+    img_topic: "/fisheye/left/image_raw"
+    camera_ns: "camera0"
+    Rcl: [0.703459, -0.710716, -0.005384, -0.006562, 0.001081, -0.999978, 0.710706, 0.703478, -0.003903]
+    Pcl: [0.017582, 0.023607, -0.037925]
+    time_offset: 0.0
+  camera1:
+    img_topic: "/fisheye/right/image_raw"
+    camera_ns: "camera1"
+    Rcl: [-0.717462, -0.695831, 0.032667, -0.026026, -0.020086, -0.999459, 0.696111, -0.717925, -0.003699]
+    Pcl: [0.017541, 0.039816, -0.033913]
+    time_offset: 0.0
+extrin_calib:
+  extrinsic_T: [-0.011, -0.02329, 0.04412]
+  extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]
+time_offset:
+  imu_time_offset: 0.0
+  lidar_time_offset: 0.0
+preprocess:
+  lidar_type: 8
+  scan_line: 4
+  point_filter_num: 3
+  blind: 0.8
+  filter_size_surf: 0.1
+visual:
+  patch_radius_deg: 0.9
+  patch_samples: 48
+  max_patches: 120
+imu:
+  imu_int_frame: 100
+  acc_cov: 0.5
+  gyr_cov: 0.1
+  b_acc_cov: 0.0001
+  b_gyr_cov: 0.0001
+lio:
+  max_iterations: 5
+  dept_err: 0.02
+  beam_err: 0.05
+  sigma_num: 3.0
+  min_eigen_value: 0.0025
+  voxel_size: 0.5
+  max_layer: 2
+  max_points_num: 100
+  layer_init_num: [5, 5, 5, 5, 5]
+local_map:
+  map_sliding_en: true
+  half_map_size: 100
+  sliding_thresh: 8.0
+publish:
+  pub_plane_en: false

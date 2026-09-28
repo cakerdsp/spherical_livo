@@ -11,6 +11,51 @@ which is included as part of this source code package.
 */
 
 #include "preprocess.h"
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <stdexcept>
+
+namespace {
+const sensor_msgs::PointField* field(const sensor_msgs::PointCloud2& msg, const std::string& name) {
+  for (const auto& f : msg.fields) if (f.name == name) return &f;
+  return nullptr;
+}
+
+template<class T>
+double scalar(const uint8_t* data, bool big_endian) {
+  uint8_t bytes[sizeof(T)];
+  std::memcpy(bytes, data, sizeof(T));
+  const uint16_t one = 1;
+  const bool native_big = *reinterpret_cast<const uint8_t*>(&one) == 0;
+  if (big_endian != native_big) std::reverse(bytes, bytes + sizeof(T));
+  T value;
+  std::memcpy(&value, bytes, sizeof(T));
+  return static_cast<double>(value);
+}
+
+double fieldValue(const uint8_t* data, const sensor_msgs::PointField* f,
+                  uint32_t step, bool big_endian) {
+  if (!f) return 0;
+  using F = sensor_msgs::PointField;
+  const unsigned widths[] = {0, 1, 1, 2, 2, 4, 4, 4, 8};
+  if (f->datatype < F::INT8 || f->datatype > F::FLOAT64 || f->count != 1 ||
+      uint64_t(f->offset) + widths[f->datatype] > step)
+    throw std::runtime_error("invalid Livox PointCloud2 field layout");
+  const auto p = data + f->offset;
+  switch (f->datatype) {
+    case F::INT8: return scalar<int8_t>(p, big_endian);
+    case F::UINT8: return scalar<uint8_t>(p, big_endian);
+    case F::INT16: return scalar<int16_t>(p, big_endian);
+    case F::UINT16: return scalar<uint16_t>(p, big_endian);
+    case F::INT32: return scalar<int32_t>(p, big_endian);
+    case F::UINT32: return scalar<uint32_t>(p, big_endian);
+    case F::FLOAT32: return scalar<float>(p, big_endian);
+    case F::FLOAT64: return scalar<double>(p, big_endian);
+  }
+  throw std::runtime_error("unsupported Livox PointCloud2 datatype");
+}
+} // namespace
 
 #define RETURN0 0x00
 #define RETURN0AND1 0x10
@@ -51,7 +96,7 @@ void Preprocess::set(bool feat_en, int lid_type, double bld, int pfilt_num)
   point_filter_num = pfilt_num;
 }
 
-void Preprocess::process(const livox_ros_driver::CustomMsg::ConstPtr &msg, PointCloudXYZI::Ptr &pcl_out)
+void Preprocess::process(const livox_ros_driver2::CustomMsg::ConstPtr &msg, PointCloudXYZI::Ptr &pcl_out)
 {
   avia_handler(msg);
   *pcl_out = pl_surf;
@@ -59,6 +104,11 @@ void Preprocess::process(const livox_ros_driver::CustomMsg::ConstPtr &msg, Point
 
 void Preprocess::process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointCloudXYZI::Ptr &pcl_out)
 {
+  pl_surf.clear();
+  if (msg->width == 0 || msg->height == 0 || msg->data.empty()) {
+    pcl_out->clear();
+    return;
+  }
   switch (lidar_type)
   {
   case OUST64:
@@ -85,6 +135,10 @@ void Preprocess::process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointClo
     robosense_handler(msg);
     break;
 
+  case LIVOX_POINTCLOUD2:
+    livox_pointcloud2_handler(msg);
+    break;
+
   default:
     printf("Error LiDAR Type: %d \n", lidar_type);
     break;
@@ -92,7 +146,54 @@ void Preprocess::process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointClo
   *pcl_out = pl_surf;
 }
 
-void Preprocess::avia_handler(const livox_ros_driver::CustomMsg::ConstPtr &msg)
+void Preprocess::livox_pointcloud2_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
+{
+  pl_surf.clear();
+  pl_corn.clear();
+  pl_full.clear();
+  const auto x = field(*msg, "x"), y = field(*msg, "y"), z = field(*msg, "z");
+  const auto offset = field(*msg, "offset_time");
+  const auto time = offset ? offset : field(*msg, "timestamp");
+  const auto tag = field(*msg, "tag");
+  const auto line = field(*msg, "line");
+  const auto intensity = field(*msg, "intensity") ? field(*msg, "intensity") : field(*msg, "reflectivity");
+  if (!x || !y || !z || !time)
+    throw std::runtime_error("Livox PointCloud2 requires x/y/z and timestamp (absolute ns) or offset_time (relative ns)");
+  if (msg->point_step == 0 || uint64_t(msg->row_step) < uint64_t(msg->width) * msg->point_step ||
+      uint64_t(msg->height - 1) * msg->row_step + uint64_t(msg->width) * msg->point_step > msg->data.size())
+    throw std::runtime_error("truncated Livox PointCloud2 data");
+  // ROS1 livox_ros_driver2 stores absolute nanoseconds in FLOAT64 timestamp.
+  // CustomMsg-to-PointCloud2 converters may retain relative ns offset_time.
+  // Keep the header origin: subtracting the first retained point shifts deskew.
+  const double origin_ns = offset ? 0.0 : static_cast<double>(msg->header.stamp.toNSec());
+  pl_surf.reserve(size_t(msg->width) * msg->height / point_filter_num + 1);
+  for (uint32_t row = 0; row < msg->height; ++row) {
+    for (uint32_t col = 0; col < msg->width; ++col) {
+      const auto data = msg->data.data() + size_t(row) * msg->row_step + size_t(col) * msg->point_step;
+      const auto read = [&](const sensor_msgs::PointField* f) {
+        return fieldValue(data, f, msg->point_step, msg->is_bigendian);
+      };
+      const double dt_ms = (read(time) - origin_ns) * 1e-6;
+      if (!std::isfinite(dt_ms) || dt_ms < -0.001 || dt_ms > 1000)
+        throw std::runtime_error("Livox point time must be nanoseconds within the scan; check bag timestamp encoding");
+      if ((size_t(row) * msg->width + col) % point_filter_num != 0) continue;
+      const double tag_value = read(tag), line_value = read(line);
+      if (!std::isfinite(tag_value) || tag_value < 0 || tag_value > 255 ||
+          !std::isfinite(line_value) || line_value < 0 || (line && line_value >= N_SCANS)) continue;
+      if (tag && (static_cast<unsigned>(tag_value) & 0x30) > 0x10) continue;
+      const double px = read(x), py = read(y), pz = read(z), reflectivity = read(intensity);
+      if (!std::isfinite(px) || !std::isfinite(py) || !std::isfinite(pz) || !std::isfinite(reflectivity) ||
+          px * px + py * py + pz * pz <= blind_sqr) continue;
+      PointType point{};
+      point.x = px; point.y = py; point.z = pz; point.intensity = reflectivity;
+      point.normal_x = point.normal_y = point.normal_z = 0;
+      point.curvature = std::max(0.0, dt_ms);
+      pl_surf.push_back(point);
+    }
+  }
+}
+
+void Preprocess::avia_handler(const livox_ros_driver2::CustomMsg::ConstPtr &msg)
 {
   pl_surf.clear();
   pl_corn.clear();

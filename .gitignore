@@ -1,2 +1,8 @@
-Log/*
-build/*
+build/
+devel/
+install/
+logs/
+results/
+*.bag
+*.pcd
+__pycache__/

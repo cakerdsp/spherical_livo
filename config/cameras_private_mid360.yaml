@@ -1,0 +1,29 @@
+# Source: cake_slam/config/camera_mei_multi_cam.yaml, active raw camera0/1 only.
+camera0:
+  model: "MEI"
+  width: 1088
+  height: 1280
+  scale: 1.0
+  fx: 1661.519541
+  fy: 1661.186841
+  cx: 535.124575
+  cy: 646.963644
+  xi: 3.177956
+  k1: -0.056745
+  k2: 0.426441
+  p1: -0.000266
+  p2: -0.001028
+camera1:
+  model: "MEI"
+  width: 1088
+  height: 1280
+  scale: 1.0
+  fx: 1654.557758
+  fy: 1654.555501
+  cx: 550.89547
+  cy: 630.361929
+  xi: 3.181583
+  k1: -0.04385
+  k2: 0.280148
+  p1: -0.003198
+  p2: -0.001684

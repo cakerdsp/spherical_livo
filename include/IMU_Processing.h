@@ -39,12 +39,10 @@ public:
   void set_acc_cov_scale(const V3D &scaler);
   void set_gyr_bias_cov(const V3D &b_g);
   void set_acc_bias_cov(const V3D &b_a);
-  void set_inv_expo_cov(const double &inv_expo);
   void set_imu_init_frame_num(const int &num);
   void disable_imu();
   void disable_gravity_est();
   void disable_bias_est();
-  void disable_exposure_est();
   void Process2(LidarMeasureGroup &lidar_meas, StatesGroup &stat, PointCloudXYZI::Ptr cur_pcl_un_);
   void UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_inout, PointCloudXYZI &pcl_out);
 
@@ -56,9 +54,7 @@ public:
   V3D cov_gyr;
   V3D cov_bias_gyr;
   V3D cov_bias_acc;
-  double cov_inv_expo;
   double first_lidar_time;
-  bool imu_time_init = false;
   bool imu_need_init = true;
   M3D Eye3d;
   V3D Zero3d;
@@ -84,7 +80,6 @@ private:
   bool imu_en = true;
   bool gravity_est_en = true;
   bool ba_bg_est_en = true;
-  bool exposure_estimate_en = true;
 };
 typedef std::shared_ptr<ImuProcess> ImuProcessPtr;
 #endif
