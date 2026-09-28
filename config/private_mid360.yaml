@@ -93,9 +93,9 @@ vio:
   raycast_en: false
   exposure_estimate_en: true
   inv_expo_cov: 0.2
-  # Legacy field; global Top-K selection does not use pixel grids.
+  # >10: cell size in pixels; <=10: derive from image height / grid_n_height.
   grid_size: 5
-  # Legacy field; global Top-K selection does not use pixel grids.
+  # Target grid rows when grid_size <=10; one representative per cell before Top-K.
   grid_n_height: 17
   # VIO optimization levels, coarse to fine; upstream spelling retained.
   patch_pyrimid_level: 3

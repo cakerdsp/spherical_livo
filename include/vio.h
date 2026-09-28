@@ -89,7 +89,7 @@ public:
 class VIOManager
 {
 public:
-  int grid_size; // upstream parameter compatibility; global selection ignores grids
+  int grid_size; // >10: cell size in pixels; otherwise derive from grid_n_height
   vk::AbstractCamera *cam;
 
   StatesGroup *state;
@@ -101,12 +101,12 @@ public:
   bool normal_en, inverse_composition_en, exposure_estimate_en, raycast_en, has_ref_patch_cache;
   bool ncc_en = false, colmap_output_en = false;
 
-  int width, height, grid_n_height; // legacy grid_n_height is not a selection quota
+  int width, height, grid_n_height; // configured rows; recomputed per camera without mutation
   double image_resize_factor;
   double fx, fy, cx, cy;
   int patch_pyrimid_level, patch_size, patch_size_total, patch_size_half, border, warp_len;
   int max_iterations, total_points;
-  int candidate_count = 0, selected_candidate_count = 0;
+  int candidate_count = 0, grid_candidate_count = 0, selected_candidate_count = 0;
   std::set<std::array<double,3>> visible_map_positions;
 
   double img_point_cov, outlier_threshold, ncc_thre;

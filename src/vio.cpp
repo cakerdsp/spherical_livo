@@ -46,6 +46,35 @@ void scaleWarpGeometry(const SphericalWarp& source,int level_delta,SphericalWarp
   // Sensor-pyramid footprints are configured separately at every scale.
   target.cover=0;target.geometry_ready=false;target.ready=false;
 }
+// Keep configured grid parameters unchanged when switching camera resolutions.
+struct CandidateGrid {
+  int width, height, size, columns, rows;
+  CandidateGrid(int w,int h,int configured_size,int configured_rows):width(w),height(h) {
+    if(w<=0 || h<=0 || (configured_size<=10 && configured_rows<=0))
+      throw std::invalid_argument("invalid visual candidate grid");
+    size=configured_size>10 ? configured_size : std::max(1,h/configured_rows);
+    columns=(w-1)/size+1; rows=(h-1)/size+1;
+  }
+  int count() const { return columns*rows; }
+  int cell(const V2D& pixel) const {
+    if(!pixel.allFinite() || pixel.x()<0 || pixel.y()<0 || pixel.x()>=width || pixel.y()>=height) return -1;
+    return int(pixel.y())/size*columns+int(pixel.x())/size;
+  }
+};
+
+template<class Candidate,class Better>
+void retainGridRepresentatives(std::vector<Candidate>& candidates,int cells,Better better) {
+  std::vector<int> winners(cells,-1);
+  for(int i=0;i<int(candidates.size());++i) {
+    int& winner=winners[candidates[i].cell];
+    if(winner<0 || better(candidates[i],candidates[winner])) winner=i;
+  }
+  std::vector<Candidate> representatives;
+  representatives.reserve(std::min(candidates.size(),size_t(cells)));
+  for(int winner:winners) if(winner>=0) representatives.push_back(std::move(candidates[winner]));
+  candidates.swap(representatives);
+}
+
 int depthCell(double coordinate) {
   return std::max(0,std::min(20,int(std::floor((coordinate+1.0)*10.0))));
 }
@@ -111,11 +140,11 @@ void VIOManager::initializeVIO()
 
 void VIOManager::resetGrid()
 {
-  // Keep the upstream per-frame reset entry point; selection is global now.
+  // Reset per-camera counters; grid representatives precede global Top-K.
   update_flag.assign(max_patches,0);
   visible_map_positions.clear();
   total_points=0;
-  candidate_count=selected_candidate_count=0;
+  candidate_count=grid_candidate_count=selected_candidate_count=0;
 }
 
 // void VIOManager::resetRvizDisplay()
@@ -157,7 +186,8 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 {
   visual_submap->reset();
   if(feat_map.empty()) return;
-  // Retain upstream local-map discovery. Pixel cells do not discard candidates.
+  // Retain upstream local-map discovery and per-cell nearest map representatives.
+  const CandidateGrid grid(width,height,grid_size,grid_n_height);
   sub_feat_map.clear();
   for(const auto& point:pg) {
     if(!point.point_w.allFinite()) continue;
@@ -175,6 +205,8 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
     VisualPoint* point;
     Feature* reference;
     std::vector<SphericalWarp> warps;
+    int cell;
+    double range_squared;
     float error=0;
     bool accepted=false;
   };
@@ -187,19 +219,26 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
       const V2D pixel=new_frame_->w2c(point->pos_);
       if(!pixel.allFinite() || !cam->isInFrame(pixel.cast<int>(),border)) continue;
       const std::array<double,3> position{point->pos_.x(),point->pos_.y(),point->pos_.z()};
-      // Exact duplicate suppression only: no one-per-grid or angular quota.
+      // Keep visible map locations for the new-point occupancy pass after the EKF.
       if(!visible_map_positions.insert(position).second) continue;
       if(point->obs_.empty() || !refreshPlane(*point)) continue;
       Feature* reference=nullptr;
       if(!point->getCloseViewObs(new_frame_->pos(),reference,pixel) || !reference->sphere_image) continue;
       const float score=vk::shiTomasiScore(img,int(pixel.x()),int(pixel.y()));
       if(!std::isfinite(score)) continue;
-      candidates.push_back({position,score,point,reference,{}});
+      const int cell=grid.cell(pixel);
+      if(cell<0) continue;
+      candidates.push_back({position,score,point,reference,{},cell,
+                            (point->pos_-new_frame_->pos()).squaredNorm()});
     }
   }
   candidate_count=int(candidates.size());
-  const int keep=std::min(max_patches,candidate_count);
-  if(keep<candidate_count) {
+  retainGridRepresentatives(candidates,grid.count(),[](const Candidate& a,const Candidate& b) {
+    return a.range_squared!=b.range_squared ? a.range_squared<b.range_squared : a.position<b.position;
+  });
+  grid_candidate_count=int(candidates.size());
+  const int keep=std::min(max_patches,grid_candidate_count);
+  if(keep<grid_candidate_count) {
     std::partial_sort(candidates.begin(),candidates.begin()+keep,candidates.end(),
       [](const Candidate& a,const Candidate& b) {
         return a.score!=b.score ? a.score>b.score : a.position<b.position;
@@ -255,11 +294,19 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
 {
   const int budget=std::max(0,max_patches-total_points);
   if(pg.size()<=10 || budget==0) return;
+  const CandidateGrid grid(width,height,grid_size,grid_n_height);
+  std::vector<unsigned char> occupied(grid.count(),0);
+  // Reproject after the EKF: new points must not occupy visible map-point cells.
+  for(const auto& position:visible_map_positions) {
+    const int cell=grid.cell(new_frame_->w2c(V3D(position[0],position[1],position[2])));
+    if(cell>=0) occupied[cell]=1;
+  }
   struct Candidate {
     const pointWithVar* point;
     V2D pixel;
     float score;
     std::array<double,3> position;
+    int cell;
   };
   std::vector<Candidate> candidates;
   candidates.reserve(pg.size());
@@ -268,13 +315,18 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
     if(!point.point_w.allFinite() || !point.normal.allFinite() || point.normal.squaredNorm()==0) return;
     const V2D pixel=new_frame_->w2c(point.point_w);
     if(!pixel.allFinite() || !cam->isInFrame(pixel.cast<int>(),border)) return;
+    const int cell=grid.cell(pixel);
+    if(cell<0 || occupied[cell]) return;
     const std::array<double,3> position{point.point_w.x(),point.point_w.y(),point.point_w.z()};
     if(!positions.insert(position).second) return;
     const float score=vk::shiTomasiScore(img,int(pixel.x()),int(pixel.y()));
-    if(std::isfinite(score) && score>0) candidates.push_back({&point,pixel,score,position});
+    if(std::isfinite(score) && score>0) candidates.push_back({&point,pixel,score,position,cell});
   };
   for(const auto& point:pg) collect(point);
   for(const auto& point:visual_submap->add_from_voxel_map) collect(point);
+  retainGridRepresentatives(candidates,grid.count(),[](const Candidate& a,const Candidate& b) {
+    return a.score!=b.score ? a.score>b.score : a.position<b.position;
+  });
   const int keep=std::min(budget,int(candidates.size()));
   if(keep<int(candidates.size())) {
     std::partial_sort(candidates.begin(),candidates.begin()+keep,candidates.end(),
@@ -712,6 +764,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   printf("\033[1;34m| %-29s | %-27zu |\033[0m\n", "Sparse Map Size", feat_map.size());
   printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Camera ID", active_camera);
   printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Eligible Candidates", candidate_count);
+  printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Grid Candidates", grid_candidate_count);
   printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Selected Candidates", selected_candidate_count);
   printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Accepted Patches", total_points);
   printf("\033[1;34m| %-29s | %-27d |\033[0m\n", "Visual Workers", visual_threads);
