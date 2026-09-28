@@ -1,6 +1,7 @@
 # Private MID360 + two raw MEI views. Calibration from cake_slam, unchanged.
 # Type 8 is Livox PointCloud2 here; type 7 remains upstream Robosense.
-# timestamp: absolute ns, or offset_time: ns relative to header.
+# Point field aliases and time normalization follow cake_slam.
+# Missing/non-varying point time uses its scan_rate-based approximation.
 # Defaults are reasoned starting values, not replay-tuned. See docs/deployment_ros1_zh.md.
 common:
   num_cameras: 2
@@ -28,6 +29,7 @@ time_offset:
 preprocess:
   lidar_type: 8
   scan_line: 4
+  scan_rate: 10
   point_filter_num: 3
   blind: 0.8
   filter_size_surf: 0.1

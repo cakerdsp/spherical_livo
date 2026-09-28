@@ -100,8 +100,10 @@ roslaunch spherical_livo mapping_m2dgr.launch \
 启动阶段需要为各相机建立原始射线 LUT。等终端出现 `Spherical LIVO ready` 后，在另一个已 source 环境的终端开始回放：
 
 ```bash
-rosbag play --clock --pause -r 0.5 /absolute/path/to/sequence.bag
+rosbag play --pause -r 0.5 /absolute/path/to/sequence.bag
 ```
+
+所有启动入口默认 `use_sim_time:=false`，不要求 `--clock`。主循环按墙上时钟调度，IMU 传播、去畸变和相机同步仍使用消息中的传感器时间戳。若其他工具需要仿真时间，可显式传入 `use_sim_time:=true` 并用 `rosbag play --clock`；即使时钟暂停，节点的回调处理循环也不会因 `Rate::sleep()` 挂起。
 
 按空格开始。首次建议半速，给球面插值和多相机事件处理留出计算余量；这是播放速度，不改变算法使用的消息时间戳。之后可按目标机吞吐能力改 `-r 1.0`，当前没有实时性测试结论。相邻分卷可按时间顺序传给同一个 `rosbag play`；重新播放一个序列时重启估计器，避免时间倒退。
 
@@ -122,10 +124,10 @@ HILTI22 五路顺序为 **C0、C3、C4、C1、C2**，默认优先三个不同朝
 默认采用旧配置对应的话题：`/livox/lidar`、`/livox/imu`、`/fisheye/left/image_raw`、`/fisheye/right/image_raw`。MEI 原图为 **1088 × 1280**，保留已有内外参，不先去畸变或缩放。
 
 - 默认 `lidar_type: 8` 对应新增加的 Livox PointCloud2。上游编号 `7` 保留给 Robosense，不能照抄旧 cake_slam 的编号 7。
-- 支持官方 Driver 2 的 `timestamp` 字段：绝对纳秒；也支持转换器保留的 `offset_time` 字段：相对消息头的纳秒。时间单位和原点按字段接口定义读取，不根据点云跨度猜测。若字段缺失或超出合法扫描时间，会明确报错。[官方字段与时间写入](https://github.com/Livox-SDK/livox_ros_driver2/blob/master/src/lddc.cpp)
+- PointCloud2 适配直接移植 cake_slam 的 `findField`、`readFieldAsDouble`、`normalizeLivoxPointTimeMs` 和 `livox_pointcloud2_handler`。时间字段按 `offset_time`、`timestamp`、`time`、`t` 的优先级选择；线号接受 `line/ring`，强度接受 `intensity/reflectivity`。时间减去有效点最小时间后，按整帧时间跨度使用旧项目的单位归一化规则。
 - 若 bag 实际记录的是 `livox_ros_driver2/CustomMsg`，使用 `roslaunch spherical_livo mapping_private_mid360.launch lidar_type:=1`；原始 `livox_ros_driver/CustomMsg` 是不同 ROS 消息包，需先转换为 Driver 2 消息或带逐点时间的 PointCloud2。
-- 仅有 XYZ/I、已丢失逐点时间的点云不属于此私有预设支持范围。ROS2 的 `.db3/.mcap` 也不能直接交给 ROS1 `rosbag play`，需提供已转换的 ROS1 bag。
-- 实机在线采集时，在同一入口加 `use_sim_time:=false`，并由设备驱动发布上述话题；本项目启动文件只负责估计器。
+- 缺少逐点时间，或逐点时间无有效跨度时，沿用 cake_slam 按点序和 `preprocess/scan_rate` 生成近似时间的处理，私有预设为 10 Hz；无时间字段时打印原有提示。这使输入兼容行为与旧项目一致，但生成的是近似时间，不能恢复已经丢失的真实采样时刻。ROS2 的 `.db3/.mcap` 仍需先转换成 ROS1 bag。
+- 实机在线采集时沿用默认 `use_sim_time:=false`，由设备驱动发布上述话题；本项目启动文件只负责估计器。
 
 ### HILTI22 与 M2DGR 输入
 
@@ -182,7 +184,7 @@ HILTI22、M2DGR 和通用 `mapping.launch` 使用相同开关。RViz 不是必�
 | 找不到 `spherical_livo` 包 | 检查源码层级和 `source ~/spherical_ws/devel/setup.bash` |
 | `Spherical LIVO ready` 前等待较久 | 正在建立原图 LUT，等准备完成再播放 bag |
 | 图像尺寸不匹配 | 使用与内参相符的原图，不能把缩放或去畸变后的图像套用原始标定 |
-| 提示 Livox 时间字段非法 | 检查 bag 的逐点时间定义；该问题不是视觉阈值能修复的 |
+| 提示 `has no time field` | 已启用旧适配层的按点序近似时间；`scan_rate` 是点云发布频率，私有预设为 10 Hz |
 | 迟到图像或队列容量报错 | 先降低 bag 播放速度，并确认 IMU、点云、图像处于同一时间基准 |
 | 有里程计但视觉 `updated` 长期为 0 | LiDAR 仍可独立运行；先查图像输入、标定和深度支持，不能当作视觉已正常融合 |
 

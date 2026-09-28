@@ -14,46 +14,109 @@ which is included as part of this source code package.
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <stdexcept>
+#include <limits>
+#include <vector>
 
-namespace {
-const sensor_msgs::PointField* field(const sensor_msgs::PointCloud2& msg, const std::string& name) {
-  for (const auto& f : msg.fields) if (f.name == name) return &f;
+// Livox PointCloud2 compatibility helpers ported from cake_slam unchanged.
+namespace
+{
+const sensor_msgs::PointField *findField(const sensor_msgs::PointCloud2 &msg, const std::vector<std::string> &names)
+{
+  for (const std::string &name : names)
+  {
+    for (const auto &field : msg.fields)
+    {
+      if (field.name == name) return &field;
+    }
+  }
   return nullptr;
 }
 
-template<class T>
-double scalar(const uint8_t* data, bool big_endian) {
-  uint8_t bytes[sizeof(T)];
-  std::memcpy(bytes, data, sizeof(T));
-  const uint16_t one = 1;
-  const bool native_big = *reinterpret_cast<const uint8_t*>(&one) == 0;
-  if (big_endian != native_big) std::reverse(bytes, bytes + sizeof(T));
-  T value;
-  std::memcpy(&value, bytes, sizeof(T));
-  return static_cast<double>(value);
+bool readFieldAsDouble(const uint8_t *point_data, const sensor_msgs::PointField &field, double &value)
+{
+  const uint8_t *ptr = point_data + field.offset;
+  switch (field.datatype)
+  {
+  case sensor_msgs::PointField::INT8:
+  {
+    int8_t v;
+    std::memcpy(&v, ptr, sizeof(v));
+    value = v;
+    return true;
+  }
+  case sensor_msgs::PointField::UINT8:
+  {
+    uint8_t v;
+    std::memcpy(&v, ptr, sizeof(v));
+    value = v;
+    return true;
+  }
+  case sensor_msgs::PointField::INT16:
+  {
+    int16_t v;
+    std::memcpy(&v, ptr, sizeof(v));
+    value = v;
+    return true;
+  }
+  case sensor_msgs::PointField::UINT16:
+  {
+    uint16_t v;
+    std::memcpy(&v, ptr, sizeof(v));
+    value = v;
+    return true;
+  }
+  case sensor_msgs::PointField::INT32:
+  {
+    int32_t v;
+    std::memcpy(&v, ptr, sizeof(v));
+    value = v;
+    return true;
+  }
+  case sensor_msgs::PointField::UINT32:
+  {
+    uint32_t v;
+    std::memcpy(&v, ptr, sizeof(v));
+    value = v;
+    return true;
+  }
+  case sensor_msgs::PointField::FLOAT32:
+  {
+    float v;
+    std::memcpy(&v, ptr, sizeof(v));
+    value = v;
+    return true;
+  }
+  case sensor_msgs::PointField::FLOAT64:
+  {
+    double v;
+    std::memcpy(&v, ptr, sizeof(v));
+    value = v;
+    return true;
+  }
+  default:
+    return false;
+  }
 }
 
-double fieldValue(const uint8_t* data, const sensor_msgs::PointField* f,
-                  uint32_t step, bool big_endian) {
-  if (!f) return 0;
-  using F = sensor_msgs::PointField;
-  const unsigned widths[] = {0, 1, 1, 2, 2, 4, 4, 4, 8};
-  if (f->datatype < F::INT8 || f->datatype > F::FLOAT64 || f->count != 1 ||
-      uint64_t(f->offset) + widths[f->datatype] > step)
-    throw std::runtime_error("invalid Livox PointCloud2 field layout");
-  const auto p = data + f->offset;
-  switch (f->datatype) {
-    case F::INT8: return scalar<int8_t>(p, big_endian);
-    case F::UINT8: return scalar<uint8_t>(p, big_endian);
-    case F::INT16: return scalar<int16_t>(p, big_endian);
-    case F::UINT16: return scalar<uint16_t>(p, big_endian);
-    case F::INT32: return scalar<int32_t>(p, big_endian);
-    case F::UINT32: return scalar<uint32_t>(p, big_endian);
-    case F::FLOAT32: return scalar<float>(p, big_endian);
-    case F::FLOAT64: return scalar<double>(p, big_endian);
-  }
-  throw std::runtime_error("unsupported Livox PointCloud2 datatype");
+struct LivoxPointCloud2Point
+{
+  PointType point;
+  int line = 0;
+  double raw_time = 0.0;
+};
+
+double normalizeLivoxPointTimeMs(double raw_time, double min_time, double max_time, size_t index, size_t count, int scan_rate)
+{
+  const double fallback_scan_ms = scan_rate > 0 ? 1000.0 / scan_rate : 100.0;
+  if (!std::isfinite(raw_time) || max_time <= min_time)
+    return count > 1 ? fallback_scan_ms * static_cast<double>(index) / static_cast<double>(count - 1) : 0.0;
+
+  const double rel = raw_time - min_time;
+  const double span = max_time - min_time;
+  if (span > 1.0e6) return rel / 1.0e6;
+  if (span > 1.0e3) return rel / 1.0e3;
+  if (span <= 1.0) return rel * 1.0e3;
+  return rel;
 }
 } // namespace
 
@@ -64,6 +127,7 @@ Preprocess::Preprocess() : feature_enabled(0), lidar_type(AVIA), blind(0.01), po
 {
   inf_bound = 10;
   N_SCANS = 6;
+  SCAN_RATE = 10;
   group_size = 8;
   disA = 0.01;
   disA = 0.1; // B?
@@ -151,46 +215,130 @@ void Preprocess::livox_pointcloud2_handler(const sensor_msgs::PointCloud2::Const
   pl_surf.clear();
   pl_corn.clear();
   pl_full.clear();
-  const auto x = field(*msg, "x"), y = field(*msg, "y"), z = field(*msg, "z");
-  const auto offset = field(*msg, "offset_time");
-  const auto time = offset ? offset : field(*msg, "timestamp");
-  const auto tag = field(*msg, "tag");
-  const auto line = field(*msg, "line");
-  const auto intensity = field(*msg, "intensity") ? field(*msg, "intensity") : field(*msg, "reflectivity");
-  if (!x || !y || !z || !time)
-    throw std::runtime_error("Livox PointCloud2 requires x/y/z and timestamp (absolute ns) or offset_time (relative ns)");
-  if (msg->point_step == 0 || uint64_t(msg->row_step) < uint64_t(msg->width) * msg->point_step ||
-      uint64_t(msg->height - 1) * msg->row_step + uint64_t(msg->width) * msg->point_step > msg->data.size())
-    throw std::runtime_error("truncated Livox PointCloud2 data");
-  // ROS1 livox_ros_driver2 stores absolute nanoseconds in FLOAT64 timestamp.
-  // CustomMsg-to-PointCloud2 converters may retain relative ns offset_time.
-  // Keep the header origin: subtracting the first retained point shifts deskew.
-  const double origin_ns = offset ? 0.0 : static_cast<double>(msg->header.stamp.toNSec());
-  pl_surf.reserve(size_t(msg->width) * msg->height / point_filter_num + 1);
-  for (uint32_t row = 0; row < msg->height; ++row) {
-    for (uint32_t col = 0; col < msg->width; ++col) {
-      const auto data = msg->data.data() + size_t(row) * msg->row_step + size_t(col) * msg->point_step;
-      const auto read = [&](const sensor_msgs::PointField* f) {
-        return fieldValue(data, f, msg->point_step, msg->is_bigendian);
-      };
-      const double dt_ms = (read(time) - origin_ns) * 1e-6;
-      if (!std::isfinite(dt_ms) || dt_ms < -0.001 || dt_ms > 1000)
-        throw std::runtime_error("Livox point time must be nanoseconds within the scan; check bag timestamp encoding");
-      if ((size_t(row) * msg->width + col) % point_filter_num != 0) continue;
-      const double tag_value = read(tag), line_value = read(line);
-      if (!std::isfinite(tag_value) || tag_value < 0 || tag_value > 255 ||
-          !std::isfinite(line_value) || line_value < 0 || (line && line_value >= N_SCANS)) continue;
-      if (tag && (static_cast<unsigned>(tag_value) & 0x30) > 0x10) continue;
-      const double px = read(x), py = read(y), pz = read(z), reflectivity = read(intensity);
-      if (!std::isfinite(px) || !std::isfinite(py) || !std::isfinite(pz) || !std::isfinite(reflectivity) ||
-          px * px + py * py + pz * pz <= blind_sqr) continue;
-      PointType point{};
-      point.x = px; point.y = py; point.z = pz; point.intensity = reflectivity;
-      point.normal_x = point.normal_y = point.normal_z = 0;
-      point.curvature = std::max(0.0, dt_ms);
-      pl_surf.push_back(point);
+
+  const auto *x_field = findField(*msg, {"x"});
+  const auto *y_field = findField(*msg, {"y"});
+  const auto *z_field = findField(*msg, {"z"});
+  if (x_field == nullptr || y_field == nullptr || z_field == nullptr)
+  {
+    printf("[ Preprocess ] Livox PointCloud2 missing x/y/z fields\n");
+    return;
+  }
+
+  const auto *intensity_field = findField(*msg, {"intensity", "reflectivity"});
+  const auto *time_field = findField(*msg, {"offset_time", "timestamp", "time", "t"});
+  const auto *line_field = findField(*msg, {"line", "ring"});
+  const size_t point_count = static_cast<size_t>(msg->width) * static_cast<size_t>(msg->height);
+  std::vector<LivoxPointCloud2Point> points;
+  points.reserve(point_count);
+
+  double min_time = std::numeric_limits<double>::infinity();
+  double max_time = -std::numeric_limits<double>::infinity();
+  const bool has_time = time_field != nullptr;
+  static bool warned_no_time = false;
+  static bool warned_feature_without_line = false;
+
+  for (uint32_t row = 0; row < msg->height; ++row)
+  {
+    const size_t row_offset = static_cast<size_t>(row) * msg->row_step;
+    for (uint32_t col = 0; col < msg->width; ++col)
+    {
+      const size_t offset = row_offset + static_cast<size_t>(col) * msg->point_step;
+      if (offset + msg->point_step > msg->data.size()) continue;
+      const uint8_t *point_data = msg->data.data() + offset;
+
+      double x = 0.0, y = 0.0, z = 0.0;
+      if (!readFieldAsDouble(point_data, *x_field, x) || !readFieldAsDouble(point_data, *y_field, y) ||
+          !readFieldAsDouble(point_data, *z_field, z))
+        continue;
+      if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) continue;
+      if (x * x + y * y + z * z < blind_sqr) continue;
+
+      LivoxPointCloud2Point item;
+      item.point.x = x;
+      item.point.y = y;
+      item.point.z = z;
+      item.point.normal_x = 0;
+      item.point.normal_y = 0;
+      item.point.normal_z = 0;
+      if (intensity_field != nullptr)
+      {
+        double intensity = 0.0;
+        if (readFieldAsDouble(point_data, *intensity_field, intensity)) item.point.intensity = intensity;
+      }
+      if (line_field != nullptr)
+      {
+        double line = 0.0;
+        if (readFieldAsDouble(point_data, *line_field, line)) item.line = static_cast<int>(line);
+      }
+      if (has_time)
+      {
+        readFieldAsDouble(point_data, *time_field, item.raw_time);
+        if (std::isfinite(item.raw_time))
+        {
+          min_time = std::min(min_time, item.raw_time);
+          max_time = std::max(max_time, item.raw_time);
+        }
+      }
+      points.push_back(item);
     }
   }
+
+  if (!has_time && !warned_no_time)
+  {
+    printf("[ Preprocess ] Livox PointCloud2 has no time field; using scan_rate-based synthetic offset time\n");
+    warned_no_time = true;
+  }
+  if (feature_enabled && line_field == nullptr && !warned_feature_without_line)
+  {
+    printf("[ Preprocess ] Livox PointCloud2 has no line/ring field; feature extraction is skipped\n");
+    warned_feature_without_line = true;
+  }
+
+  for (size_t i = 0; i < points.size(); ++i)
+    points[i].point.curvature = normalizeLivoxPointTimeMs(points[i].raw_time, min_time, max_time, i, points.size(), SCAN_RATE);
+
+  if (feature_enabled && line_field != nullptr)
+  {
+    for (int i = 0; i < N_SCANS; i++)
+    {
+      pl_buff[i].clear();
+      pl_buff[i].reserve(points.size());
+    }
+    for (const auto &item : points)
+    {
+      if (item.line >= 0 && item.line < N_SCANS) pl_buff[item.line].push_back(item.point);
+    }
+    for (int j = 0; j < N_SCANS; j++)
+    {
+      PointCloudXYZI &pl = pl_buff[j];
+      int linesize = pl.size();
+      if (linesize <= 5) continue;
+      vector<orgtype> &types = typess[j];
+      types.clear();
+      types.resize(linesize);
+      linesize--;
+      for (uint i = 0; i < linesize; i++)
+      {
+        types[i].range = pl[i].x * pl[i].x + pl[i].y * pl[i].y;
+        vx = pl[i].x - pl[i + 1].x;
+        vy = pl[i].y - pl[i + 1].y;
+        vz = pl[i].z - pl[i + 1].z;
+        types[i].dista = vx * vx + vy * vy + vz * vz;
+      }
+      types[linesize].range = pl[linesize].x * pl[linesize].x + pl[linesize].y * pl[linesize].y;
+      give_feature(pl, types);
+    }
+  }
+  else
+  {
+    pl_surf.reserve(points.size());
+    for (size_t i = 0; i < points.size(); ++i)
+    {
+      if (i % point_filter_num == 0) pl_surf.push_back(points[i].point);
+    }
+  }
+  printf("[ Preprocess ] Livox PointCloud2 output point number: %zu \n", pl_surf.points.size());
 }
 
 void Preprocess::avia_handler(const livox_ros_driver2::CustomMsg::ConstPtr &msg)

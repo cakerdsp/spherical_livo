@@ -4,7 +4,7 @@
   <arg name="config" default="$(find spherical_livo)/config/m2dgr.yaml" />
   <arg name="cameras" default="$(find spherical_livo)/config/cameras_m2dgr.yaml" />
   <arg name="output_dir" default="" />
-  <arg name="use_sim_time" default="true" />
+  <arg name="use_sim_time" default="false" />
   <param name="/use_sim_time" value="$(arg use_sim_time)" />
   <node pkg="spherical_livo" type="spherical_livo_node" name="spherical_livo" output="screen" required="true">
     <rosparam command="load" file="$(arg config)" />

@@ -45,8 +45,10 @@ roslaunch spherical_livo mapping_m2dgr.launch num_cameras:=3 output_dir:=$HOME/s
 
 ```bash
 source ~/spherical_ws/devel/setup.bash
-rosbag play --clock -r 0.5 /absolute/path/to/sequence.bag
+rosbag play -r 0.5 /absolute/path/to/sequence.bag
 ```
+
+所有启动文件默认 `use_sim_time:=false`，普通 `rosbag play` 即可；主循环使用墙上时钟调度，估计器仍使用传感器消息时间戳。需要仿真时间时显式设置 `use_sim_time:=true` 并配合 `rosbag play --clock`。
 
 相同数据重复播放需重新启动节点。输入时间倒退会明确报错，不在已有地图中拼接不同时间段。
 
@@ -60,7 +62,7 @@ rosbag play --clock -r 0.5 /absolute/path/to/sequence.bag
 
 所有启动入口默认开启 RViz，共用 `rviz_cfg/spherical_livo.rviz`：固定坐标系 `world`，显示最近 30 秒点云、轨迹和当前 IMU 位姿。无需图形界面时加 `rviz:=false`；关闭 RViz 窗口不会停止估计器。目标机需要安装 `ros-noetic-rviz`。
 
-配置在 `config/` 下。私有与 M2DGR 标定来自 cake_slam；HILTI22 使用重新整理的官方逐相机标定，见 [来源与编号对应](docs/calibration_sources.md)。参数均为未回放验证的默认值。私有 PointCloud2 使用类型 **8**，与旧项目的类型编号不同。
+配置在 `config/` 下。私有与 M2DGR 标定来自 cake_slam；HILTI22 使用重新整理的官方逐相机标定，见 [来源与编号对应](docs/calibration_sources.md)。参数均为未回放验证的默认值。私有 PointCloud2 使用类型 **8**，与旧项目的类型编号不同。 该路径直接移植 cake_slam 的字段解析与时间归一化逻辑，支持 `offset_time/timestamp/time/t` 和 `line/ring`；无有效时间跨度时沿用旧项目按 `scan_rate` 生成近似逐点时间的行为。
 
 自有设备使用：
 

@@ -78,9 +78,10 @@ class Node {
     pre_.set(false,parameter(nh_,"preprocess/lidar_type",2),parameter(nh_,"preprocess/blind",0.5),
              parameter(nh_,"preprocess/point_filter_num",1));
     pre_.N_SCANS=parameter(nh_,"preprocess/scan_line",32);pre_.blind_sqr=pre_.blind*pre_.blind;
+    pre_.SCAN_RATE=parameter(nh_,"preprocess/scan_rate",10);
     imu_.lidar_type=pre_.lidar_type;
     const double leaf=parameter(nh_,"preprocess/filter_size_surf",0.1);
-    if(leaf<=0||pre_.N_SCANS<1||pre_.N_SCANS>128||pre_.point_filter_num<1||pre_.lidar_type<1||pre_.lidar_type>8)
+    if(leaf<=0||pre_.N_SCANS<1||pre_.N_SCANS>128||pre_.point_filter_num<1||pre_.SCAN_RATE<1||pre_.lidar_type<1||pre_.lidar_type>8)
       throw std::invalid_argument("invalid preprocessing configuration");
     downsample_.setLeafSize(leaf,leaf,leaf);
     spherical::VisualConfig visual;
@@ -286,7 +287,9 @@ class Node {
 int main(int argc,char** argv){
   ros::init(argc,argv,"spherical_livo");ros::NodeHandle nh("~");
   try{Node node(nh);ROS_INFO("Spherical LIVO ready: camera LUTs built, sensor subscribers ready");
-    ros::Rate rate(500);while(ros::ok()){ros::spinOnce();node.processReady();rate.sleep();}}
+    // Callback pumping must remain live when /clock is absent or paused.
+    // Estimator propagation still uses sensor header timestamps.
+    ros::WallRate rate(500);while(ros::ok()){ros::spinOnce();node.processReady();rate.sleep();}}
   catch(const std::exception& e){ROS_FATAL("Spherical LIVO stopped: %s",e.what());return 1;}
   return 0;
 }
