@@ -1,5 +1,7 @@
 # Native M2DGR intrinsics copied from cake_slam; no image remapping.
 camera0:
+  # Default, unused by EquidistantCamera; xi applies only to MEI.
+  xi: 0.0
   model: EquidistantCamera
   width: 1280
   height: 1024
@@ -14,6 +16,8 @@ camera0:
   k4: 0.007442211946112636
 
 camera1:
+  # Default, unused by EquidistantCamera; xi applies only to MEI.
+  xi: 0.0
   model: EquidistantCamera
   width: 1280
   height: 1024
@@ -28,6 +32,8 @@ camera1:
   k4: 0.004810173767131135
 
 camera2:
+  # Default, unused by EquidistantCamera; xi applies only to MEI.
+  xi: 0.0
   model: EquidistantCamera
   width: 1280
   height: 1024
@@ -42,6 +48,8 @@ camera2:
   k4: 0.006593296524853555
 
 camera3:
+  # Default, unused by EquidistantCamera; xi applies only to MEI.
+  xi: 0.0
   model: EquidistantCamera
   width: 1280
   height: 1024
@@ -56,6 +64,8 @@ camera3:
   k4: -0.014358151534147164
 
 camera4:
+  # Default, unused by EquidistantCamera; xi applies only to MEI.
+  xi: 0.0
   model: EquidistantCamera
   width: 1280
   height: 1024

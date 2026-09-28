@@ -2,6 +2,8 @@
 # Attribution and exact source files: docs/calibration_sources.md.
 # Internal camera0..4 map to physical C0,C3,C4,C1,C2; first N are active.
 camera0:
+  # Default, unused by EquidistantCamera; xi applies only to MEI.
+  xi: 0.0
   model: "EquidistantCamera"
   width: 720
   height: 540
@@ -15,6 +17,8 @@ camera0:
   k3: 0.008912969593422046
   k4: -0.0037685977496087313
 camera1:
+  # Default, unused by EquidistantCamera; xi applies only to MEI.
+  xi: 0.0
   model: "EquidistantCamera"
   width: 720
   height: 540
@@ -28,6 +32,8 @@ camera1:
   k3: 0.0004634700730293949
   k4: -0.00036698216675371063
 camera2:
+  # Default, unused by EquidistantCamera; xi applies only to MEI.
+  xi: 0.0
   model: "EquidistantCamera"
   width: 720
   height: 540
@@ -41,6 +47,8 @@ camera2:
   k3: 0.003451041303088915
   k4: -0.0011463543672005018
 camera3:
+  # Default, unused by EquidistantCamera; xi applies only to MEI.
+  xi: 0.0
   model: "EquidistantCamera"
   width: 720
   height: 540
@@ -54,6 +62,8 @@ camera3:
   k3: 0.004398151558986798
   k4: -0.0019701263170917808
 camera4:
+  # Default, unused by EquidistantCamera; xi applies only to MEI.
+  xi: 0.0
   model: "EquidistantCamera"
   width: 720
   height: 540

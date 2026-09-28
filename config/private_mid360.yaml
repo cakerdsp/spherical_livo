@@ -4,6 +4,11 @@
 # Missing/non-varying point time uses its scan_rate-based approximation.
 # Defaults are reasoned starting values, not replay-tuned. See docs/deployment_ros1_zh.md.
 common:
+  # Legacy field; subscriptions use cameras/cameraN/img_topic.
+  img_topic: "/left_camera/image"
+  lidar_en: 1
+  img_en: 1
+  ros_driver_bug_fix: false
   multi_cam_sync_tolerance_ms: 40.0
   num_cameras: 2
   lid_topic: "/livox/lidar"
@@ -22,12 +27,20 @@ cameras:
     Pcl: [0.017541, 0.039816, -0.033913]
     time_offset: 0.0
 extrin_calib:
+  # Unused legacy single-camera field; see cameras/cameraN/Rcl.
+  Rcl: []
+  # Unused legacy single-camera field; see cameras/cameraN/Pcl.
+  Pcl: []
   extrinsic_T: [-0.011, -0.02329, 0.04412]
   extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]
 time_offset:
+  img_time_offset: 0.0
+  exposure_time_init: 0.0
   imu_time_offset: 0.0
   lidar_time_offset: 0.0
 preprocess:
+  feature_extract_enabled: false
+  hilti_en: false
   lidar_type: 8
   scan_line: 4
   scan_rate: 10
@@ -39,6 +52,9 @@ visual:
   patch_samples: 48
   max_patches: 120
 imu:
+  ba_bg_est_en: true
+  gravity_est_en: true
+  imu_en: true
   imu_int_frame: 100
   acc_cov: 0.5
   gyr_cov: 0.1
@@ -59,4 +75,58 @@ local_map:
   half_map_size: 100
   sliding_thresh: 8.0
 publish:
+  dense_map_en: false
+  pub_effect_point_en: false
+  pub_scan_num: 1
+  blind_rgb_points: 0.01
   pub_plane_en: false
+
+vio:
+  # Fixed true by the spherical frontend.
+  normal_en: true
+  # Fixed false by the spherical frontend.
+  inverse_composition_en: false
+  max_iterations: 5
+  # Photometric measurement covariance in the EKF.
+  img_point_cov: 100
+  # Fixed false by the spherical frontend.
+  raycast_en: false
+  exposure_estimate_en: true
+  inv_expo_cov: 0.2
+  # Legacy field; global Top-K selection does not use pixel grids.
+  grid_size: 5
+  # Legacy field; global Top-K selection does not use pixel grids.
+  grid_n_height: 17
+  # VIO optimization levels, coarse to fine; upstream spelling retained.
+  patch_pyrimid_level: 3
+  # Legacy field; spherical sample count is visual/patch_samples.
+  patch_size: 8
+  # Maximum mean squared patch photometric residual.
+  outlier_threshold: 1000
+
+uav:
+  gravity_align_en: false
+  imu_rate_odom: false
+
+evo:
+  # Also enabled when output_dir is nonempty.
+  pose_output_en: false
+  seq_name: "01"
+
+pcd_save:
+  filter_size_pcd: 0.5
+  # Fixed false by the spherical frontend.
+  colmap_output_en: false
+  type: 0
+  pcd_save_en: false
+  interval: -1
+
+image_save:
+  interval: 1
+  img_save_en: false
+
+debug:
+  frame_cnt: 6
+  plot_time: -10
+# Launch output_dir argument overrides this; nonempty enables pose output.
+output_dir: ""
