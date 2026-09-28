@@ -1,6 +1,5 @@
 #include "spherical.h"
-#include <Eigen/Eigenvalues>
-#include <Eigen/LU>
+#include <opencv2/imgproc.hpp>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -141,21 +140,39 @@ bool CameraModel::project(const Vec& p,Eigen::Vector2d& pixel) const {
   return pixel.allFinite();
 }
 
-bool RayAtlas::locateCell(const Vec& b,int x,int y,Eigen::Vector2d& pixel) const {
-  if(x<0 || y<0 || x>=width_-1 || y>=height_-1) return false;
-  for(int triangle=0;triangle<2;++triangle) {
-    const Vec r0=ray(x,y),r1=triangle==0?ray(x+1,y):ray(x+1,y+1),
-              r2=triangle==0?ray(x+1,y+1):ray(x,y+1);
-    const Vec c12=r1.cross(r2),c20=r2.cross(r0),c01=r0.cross(r1);
-    const double determinant=r0.dot(c12);
+bool RayAtlas::triangleCell(const Vec& b,int x,int y,int level,Triangle& out) const {
+  if(level<0 || level>=levels()) return false;
+  const auto size=masses_[level].size();
+  if(x<0 || y<0 || x>=size.width-1 || y>=size.height-1) return false;
+  const int step=1<<level;
+  for(int side=0;side<2;++side) {
+    const std::array<cv::Point,3> vertices{{{x,y},{x+1,side==0?y:y+1},{side==0?x+1:x,y+1}}};
+    const Vec r0=ray(vertices[0].x*step,vertices[0].y*step),
+              r1=ray(vertices[1].x*step,vertices[1].y*step),
+              r2=ray(vertices[2].x*step,vertices[2].y*step);
+    if(r0.squaredNorm()<0.9 || r1.squaredNorm()<0.9 || r2.squaredNorm()<0.9) continue;
+    Mat inverse;
+    inverse.row(0)=r1.cross(r2).transpose();
+    inverse.row(1)=r2.cross(r0).transpose();
+    inverse.row(2)=r0.cross(r1).transpose();
+    const double determinant=r0.dot(inverse.row(0));
     if(std::abs(determinant)<1e-14) continue;
-    Vec a(b.dot(c12)/determinant,b.dot(c20)/determinant,b.dot(c01)/determinant);
-    if(a.minCoeff() < -1e-7 || a.sum()<=0) continue;
-    a/=a.sum();
-    pixel=triangle==0 ? Eigen::Vector2d(x+a[1]+a[2],y+a[2]) : Eigen::Vector2d(x+a[1],y+a[1]+a[2]);
+    inverse/=determinant;
+    const Vec a=inverse*b;const double sum=a.sum();
+    if(a.minCoeff() < -1e-9 || !(sum>0)) continue;
+    out.vertices=vertices;out.weights=a/sum;
+    out.derivative=(inverse-out.weights*inverse.colwise().sum())/sum;
+    out.pixel.setZero();
+    for(int i=0;i<3;++i) out.pixel+=out.weights[i]*Eigen::Vector2d(vertices[i].x,vertices[i].y);
     return true;
   }
   return false;
+}
+
+bool RayAtlas::locateCell(const Vec& b,int x,int y,Eigen::Vector2d& pixel) const {
+  Triangle found;
+  if(!triangleCell(b,x,y,0,found)) return false;
+  pixel=found.pixel;return true;
 }
 
 RayAtlas::RayAtlas(const CameraModel& model):model_(model),width_(model.width),height_(model.height) {
@@ -174,6 +191,31 @@ RayAtlas::RayAtlas(const CameraModel& model):model_(model),width_(model.width),h
   if(seeds_.empty()) throw std::invalid_argument("camera has no valid ray support");
   std::vector<int> ids(seeds_.size()); std::iota(ids.begin(),ids.end(),0);
   nodes_.reserve(ids.size()); root_=build(ids,0,ids.size(),0);
+  // Binomial 5-tap pyramid centers coincide with raw pixel (2^level*x,2^level*y).
+  // Area masses and support envelopes depend only on calibration, not frames.
+  masses_.emplace_back(height_,width_,CV_32FC1,areas_.data());
+  radii_.emplace_back(); // native pixels have zero prefilter support radius
+  while(masses_.back().rows>=16 && masses_.back().cols>=16) {
+    const int level=int(masses_.size()),step=1<<level;
+    cv::Mat mass;cv::pyrDown(masses_.back(),mass);
+    cv::Mat radius(mass.size(),CV_32FC1,cv::Scalar(2));
+    const auto& previous=masses_.back();
+    for(int y=0;y<mass.rows;++y) for(int x=0;x<mass.cols;++x) {
+      if(2*x<2 || 2*y<2 || 2*x+2>=previous.cols || 2*y+2>=previous.rows) continue;
+      const Vec center=ray(x*step,y*step);
+      if(center.squaredNorm()<0.9) continue;
+      double bound=0;
+      for(int dy=-2;dy<=2;++dy) for(int dx=-2;dx<=2;++dx) {
+        const cv::Point child(2*x+dx,2*y+dy);
+        const Vec direction=ray(child.x*(step/2),child.y*(step/2));
+        const double child_radius=level==1?0:radii_.back().at<float>(child);
+        bound=std::max(bound,(direction-center).norm()+child_radius);
+      }
+      // Inflate for float LUT/envelope storage; the exact check remains fallback.
+      radius.at<float>(y,x)=float(std::min(2.0,bound+1e-6));
+    }
+    masses_.push_back(mass);radii_.push_back(radius);
+  }
 }
 
 int RayAtlas::build(std::vector<int>& ids,int begin,int end,int depth) {
@@ -239,39 +281,33 @@ bool RayAtlas::locate(const Vec& b,Eigen::Vector2d& pixel,double& pitch) const {
   return false;
 }
 
-Image::Image(std::shared_ptr<const RayAtlas> atlas,const cv::Mat& gray,bool estimate_noise):atlas_(std::move(atlas)) {
-  if(gray.type()!=CV_8UC1||gray.cols!=atlas_->width()||gray.rows!=atlas_->height())
-    throw std::invalid_argument("image must be mono8 with calibrated dimensions");
-  gray_=gray.clone();bounds_=cv::Rect(0,0,gray.cols,gray.rows);
-  if(!estimate_noise) return; // VIO uses the restored upstream img_point_cov.
-  std::vector<double> highpass;
-  for(int y=1;y<gray.rows-1;y+=4) for(int x=1;x<gray.cols-1;x+=4)
-    highpass.push_back(std::abs(double(gray.at<uchar>(y,x))-gray.at<uchar>(y+1,x)-
-      gray.at<uchar>(y,x+1)+gray.at<uchar>(y+1,x+1))/510.0);
-  if(!highpass.empty()){
-    auto m=highpass.begin()+highpass.size()/2;std::nth_element(highpass.begin(),m,highpass.end());
-    noise_=std::max(noise_,*m/0.6744897501960817);
-  }
+bool RayAtlas::triangle(const Vec& b,int level,Triangle& out) const {
+  if(level<0 || level>=levels() || !b.allFinite() || std::abs(b.squaredNorm()-1)>1e-5) return false;
+  Eigen::Vector2d pixel;
+  const double step=double(1<<level);
+  const auto nearby=[&](const Eigen::Vector2d& raw) {
+    const Eigen::Vector2d coarse=raw/step;
+    const auto size=masses_[level].size();
+    if(coarse.x() < -2 || coarse.y() < -2 || coarse.x()>size.width+1 || coarse.y()>size.height+1) return false;
+    const int x=int(std::floor(coarse.x())),y=int(std::floor(coarse.y()));
+    if(triangleCell(b,x,y,level,out)) return true;
+    for(int dy=-1;dy<=1;++dy) for(int dx=-1;dx<=1;++dx)
+      if((dx || dy) && triangleCell(b,x+dx,y+dy,level,out)) return true;
+    return false;
+  };
+  if(model_.project(b,pixel) && nearby(pixel)) return true;
+  // Preserve the LUT fallback for ambiguous/nonlinear native projection regions.
+  double pitch;
+  return locate(b,pixel,pitch) && nearby(pixel);
 }
 
-std::shared_ptr<Image> Image::crop(const cv::Rect& roi) const {
-  const cv::Rect box=roi&bounds_;if(box.empty()) throw std::invalid_argument("empty reference crop");
-  auto out=std::shared_ptr<Image>(new Image);out->atlas_=atlas_;out->bounds_=box;out->noise_=noise_;
-  out->gray_=gray_(cv::Rect(box.x-bounds_.x,box.y-bounds_.y,box.width,box.height)).clone();return out;
+double RayAtlas::supportRadius(int level,const cv::Point& pixel) const {
+  return level==0 ? 0.0 : double(radii_.at(level).at<float>(pixel));
 }
 
-bool Image::locate(const Vec& b,Eigen::Vector2d& pixel,double& pitch) const {
-  if(!atlas_->locate(b,pixel,pitch)) return false;
-  return pixel.x()>=bounds_.x && pixel.y()>=bounds_.y &&
-    pixel.x()<bounds_.x+bounds_.width-1 && pixel.y()<bounds_.y+bounds_.height-1;
-}
-
-SamplingKernel SamplingKernel::fromMatrix(const Mat& matrix) {
-  SamplingKernel result; result.matrix=matrix;
-  Eigen::SelfAdjointEigenSolver<Mat> eig(matrix);
-  if(eig.info()==Eigen::Success && eig.eigenvalues().minCoeff()>0)
-    result.radius=1/std::sqrt(eig.eigenvalues().minCoeff());
-  return result;
+cv::Rect RayAtlas::supportBox(int level,const cv::Point& pixel) const {
+  const int step=1<<level,radius=2*(step-1);
+  return cv::Rect(pixel.x*step-radius,pixel.y*step-radius,2*radius+1,2*radius+1);
 }
 
 bool PlaneSupport::contains(const Vec& ray) const {
@@ -280,83 +316,118 @@ bool PlaneSupport::contains(const Vec& ray) const {
   return (ray*(height/den)-center).squaredNorm()<=radius*radius;
 }
 
-bool PlaneSupport::containsKernel(const Vec& b,double r) const {
-  if(std::abs(b.squaredNorm()-1.0)>1e-10) return false;
+bool PlaneSupport::containsKernel(const Vec& bearing,double radius_bound) const {
+  const double length=bearing.norm();
+  if(!(length>0)) return false;
+  const Vec b=bearing/length;
+  const double r=radius_bound+std::abs(length-1.0);
   const double den=normal.dot(b),n=normal.norm(),lower=std::abs(den)-n*r;
   if(lower<=1e-6*(1+r) || !(height/den>0)) return false;
-  // Exact ray-plane difference: h/(n.d) (I - b n^T/(n.b)) (d-b).
-  // For unit b the projection's spectral norm is ||n||/|n.b|. Thus this
-  // conservative bound proves ALL kernel rays fit; otherwise inspect pixels.
   const double bound=std::abs(height)*r*n/(lower*std::abs(den));
   return (b*(height/den)-center).norm()+bound+1e-10<=radius;
 }
 
-bool Image::sample(const Vec& b,const Mat& a,Sample& out) const {
-  return sampleImpl(b,SamplingKernel::fromMatrix(a),out,true,true,nullptr);
-}
-
-bool Image::sample(const Vec& b,const SamplingKernel& kernel,Sample& out,
-                   bool gradient,const PlaneSupport* support) const {
-  return sampleImpl(b,kernel,out,gradient,false,support);
-}
-
-bool Image::sampleImpl(const Vec& b,const SamplingKernel& kernel,Sample& out,
-                      bool gradient,bool weights,const PlaneSupport* support) const {
-  out.value=0;out.gradient.setZero();out.weights.clear();
-  Eigen::Vector2d uv;double pitch;
-  if(!(kernel.radius>0 && kernel.radius<=0.3) || !locate(b,uv,pitch)) return false;
-  const Mat& a=kernel.matrix;
-  const PlaneSupport* check=(support && !support->containsKernel(b,kernel.radius)) ? support : nullptr;
-  const int cx=std::lround(uv.x()),cy=std::lround(uv.y());
-  int extent=std::max(2,int(std::ceil(1.5*kernel.radius/pitch)));
-  if(extent>128) return false;
-  for(int attempt=0;attempt<4;++attempt) {
-    out.value=0;out.gradient.setZero();out.weights.clear();
-    double mass=0;Vec dm=Vec::Zero(),dv=Vec::Zero();bool expand=false;int count=0;
-    const int y0=std::max(0,cy-extent),y1=std::min(atlas_->height()-1,cy+extent);
-    const int x0=std::max(0,cx-extent),x1=std::min(atlas_->width()-1,cx+extent);
-    for(int y=y0;y<=y1;++y) for(int x=x0;x<=x1;++x) {
-      const Vec ray=atlas_->ray(x,y),d=b-ray,ad=a*d;
-      const double q=d.dot(ad);
-      if(q>=1||q<0) continue;
-      if(x<=bounds_.x||y<=bounds_.y||x>=bounds_.x+bounds_.width-1||y>=bounds_.y+bounds_.height-1)
-        return false;
-      if(x==cx-extent||x==cx+extent||y==cy-extent||y==cy+extent) expand=true;
-      const double area=atlas_->area(x,y);if(area<=0) return false;
-      const int value=gray_.at<uchar>(y-bounds_.y,x-bounds_.x);
-      if(value<=1||value>=254 || (check && !check->contains(ray))) return false;
-      const double r=std::sqrt(q),t=1-r,t3=t*t*t,w=area*t3*t*(4*r+1);
-      mass+=w;out.value+=w*value;++count;
-      if(gradient) { const Vec dw=(-20*area*t3)*ad;dm+=dw;dv+=dw*value; }
-      if(weights) out.weights.emplace_back(y*atlas_->width()+x,w);
+Image::Image(std::shared_ptr<const RayAtlas> atlas,const cv::Mat& gray):atlas_(std::move(atlas)) {
+  if(gray.type()!=CV_8UC1 || gray.cols!=atlas_->width() || gray.rows!=atlas_->height())
+    throw std::invalid_argument("image must be mono8 with calibrated dimensions");
+  levels_.resize(atlas_->levels());
+  gray.convertTo(levels_[0].values,CV_32F,1.0/255.0);
+  cv::inRange(gray,cv::Scalar(2),cv::Scalar(253),levels_[0].valid);
+  levels_[0].valid.setTo(0,atlas_->mass(0)<=0);
+  levels_[0].values.setTo(0,levels_[0].valid==0);
+  const cv::Mat kernel=cv::Mat::ones(5,5,CV_8U);
+  for(int level=1;level<atlas_->levels();++level) {
+    const auto& previous=levels_[level-1];auto& next=levels_[level];
+    cv::Mat numerator=previous.values.mul(atlas_->mass(level-1)),filtered,valid;
+    cv::pyrDown(numerator,filtered,atlas_->mass(level).size());
+    cv::divide(filtered,atlas_->mass(level),next.values);
+    // Every positive-weight contributor must be valid, including image edges.
+    cv::erode(previous.valid,valid,kernel,cv::Point(-1,-1),1,cv::BORDER_CONSTANT,cv::Scalar(0));
+    next.valid.create(next.values.size(),CV_8UC1);
+    for(int y=0;y<next.valid.rows;++y) {
+      auto* dst=next.valid.ptr<uchar>(y);const auto* src=valid.ptr<uchar>(2*y);
+      for(int x=0;x<next.valid.cols;++x) dst[x]=src[2*x];
     }
-    if(expand){extent*=2;if(extent>128) return false;continue;}
-    if(mass<=1e-20||count<3) return false;
-    out.value/=mass;
-    if(gradient) {
-      const Vec g=(dv-out.value*dm)/(mass*255.0);
-      out.gradient=g-b*b.dot(g);
-    }
-    out.value/=255.0;
-    if(weights) for(auto& w:out.weights) w.second/=mass;
-    return out.gradient.allFinite();
+    next.valid.setTo(0,atlas_->mass(level)<=0);
+    next.values.setTo(0,next.valid==0);
   }
-  return false;
 }
 
-double weightOverlap(const Sample& a,const Sample& b) {
-  size_t i=0,j=0;double value=0;
-  while(i<a.weights.size()&&j<b.weights.size()){
-    if(a.weights[i].first<b.weights[j].first)++i;
-    else if(a.weights[i].first>b.weights[j].first)++j;
-    else {value+=a.weights[i++].second*b.weights[j++].second;}
-  }
-  return value;
+bool Image::locate(const Vec& b,Eigen::Vector2d& pixel,double& pitch) const {
+  return atlas_->locate(b,pixel,pitch);
 }
 
-Mat precision(const Vec& b,const Eigen::Matrix2d& footprint) {
-  const Basis e=tangentBasis(b);
-  Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> eig(footprint);
-  return e*footprint.inverse()*e.transpose()+b*b.transpose()/eig.eigenvalues().maxCoeff();
+bool Image::inspect(const Vec& b,int level,Triangle& triangle,double& cover,const PlaneSupport* support) const {
+  if(!atlas_->triangle(b,level,triangle)) return false;
+  const int step=1<<level;
+  cover=0;
+  // Validate the entire chosen triangle, including vertices with zero weight:
+  // an invalid vertex must not become a hidden derivative contribution.
+  for(const auto& vertex:triangle.vertices) {
+    if(!levels_[level].valid.at<uchar>(vertex)) return false;
+    const Vec ray=atlas_->ray(vertex.x*step,vertex.y*step);
+    const double radius=atlas_->supportRadius(level,vertex);
+    cover=std::max(cover,(ray.normalized()-b).norm()+radius+1e-6);
+    if(!support) continue;
+    if(level==0) { if(!support->contains(ray)) return false;continue; }
+    if(support->containsKernel(ray,radius)) continue;
+    // Rare finite-plane boundary case: retain the exact contributor check.
+    // This is only a geometry fallback, never a weighted intensity search.
+    const cv::Rect box=atlas_->supportBox(level,vertex);
+    if(box.x<0 || box.y<0 || box.x+box.width>atlas_->width() || box.y+box.height>atlas_->height()) return false;
+    for(int y=box.y;y<box.y+box.height;++y) for(int x=box.x;x<box.x+box.width;++x)
+      if(!support->contains(atlas_->ray(x,y))) return false;
+  }
+  return true;
+}
+
+bool Image::prepare(const Vec& b,const Mat& covariance,SamplingFilter& filter,double& cover,
+                    const PlaneSupport* support) const {
+  if(!covariance.allFinite()) return false;
+  Triangle native;
+  if(!atlas_->triangle(b,0,native)) return false;
+  Eigen::Matrix<double,2,3> pixel_derivative=Eigen::Matrix<double,2,3>::Zero();
+  for(int i=0;i<3;++i) {
+    pixel_derivative.row(0)+=native.vertices[i].x*native.derivative.row(i);
+    pixel_derivative.row(1)+=native.vertices[i].y*native.derivative.row(i);
+  }
+  const Eigen::Matrix2d footprint=pixel_derivative*covariance*pixel_derivative.transpose();
+  const double variance=0.5*(footprint.trace()+std::hypot(footprint(0,0)-footprint(1,1),2*footprint(0,1)));
+  const double minimum=0.5*(footprint.trace()-std::hypot(footprint(0,0)-footprint(1,1),2*footprint(0,1)));
+  if(!std::isfinite(variance) || minimum < -1e-10*std::max(1.0,variance) || variance<0) return false;
+  // A recursive [1 4 6 4 1]/16 pyramid has sensor-pixel variance (4^L-1)/3.
+  const int last=int(levels_.size())-1;
+  if(variance>(std::ldexp(1.0,2*last)-1)/3.0) return false;
+  filter.level=std::min(last,int(std::floor(0.5*std::log2(1+3*variance))));
+  const double lower=(std::ldexp(1.0,2*filter.level)-1)/3.0;
+  filter.blend=filter.level==last ? 0 : std::max(0.0,std::min(1.0,(variance-lower)/std::ldexp(1.0,2*filter.level)));
+  if(filter.blend==1) { ++filter.level;filter.blend=0; }
+  Triangle triangle;double radius;
+  if(!inspect(b,filter.level,triangle,cover,support)) return false;
+  if(filter.blend>0) {
+    if(!inspect(b,filter.level+1,triangle,radius,support)) return false;
+    cover=std::max(cover,radius);
+  }
+  return true;
+}
+
+bool Image::sample(const Vec& b,const SamplingFilter& filter,Sample& out,bool gradient,
+                   const PlaneSupport* support) const {
+  out.value=0;out.gradient.setZero();
+  if(filter.level<0 || filter.level>=int(levels_.size()) ||
+     !(filter.blend>=0 && filter.blend<=1) ||
+     (filter.blend>0 && filter.level+1>=int(levels_.size()))) return false;
+  for(int offset=0;offset<(filter.blend>0?2:1);++offset) {
+    const int level=filter.level+offset;
+    const double blend=offset==0?1-filter.blend:filter.blend;
+    Triangle triangle;double cover;
+    if(!inspect(b,level,triangle,cover,support)) return false;
+    Vec values;
+    for(int i=0;i<3;++i) values[i]=levels_[level].values.at<float>(triangle.vertices[i]);
+    out.value+=blend*values.dot(triangle.weights);
+    if(gradient) out.gradient+=blend*triangle.derivative.transpose()*values;
+  }
+  if(gradient) out.gradient-=b*b.dot(out.gradient);
+  return std::isfinite(out.value) && out.gradient.allFinite();
 }
 } // namespace spherical

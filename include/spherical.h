@@ -34,6 +34,15 @@ struct CameraModel {
   void validate() const;
 };
 
+// Barycentric coordinates and their derivative with respect to a 3-D ray.
+// Vertices are indices in the selected decimated sensor lattice.
+struct Triangle {
+  std::array<cv::Point,3> vertices;
+  Vec weights;
+  Mat derivative;
+  Eigen::Vector2d pixel;
+};
+
 class RayAtlas {
  public:
   explicit RayAtlas(const CameraModel& model);
@@ -44,6 +53,11 @@ class RayAtlas {
   // Returns an original sensor cell only as an indexing aid. Containment is
   // checked with its three unit rays, including directions with z <= 0.
   bool locate(const Vec& b, Eigen::Vector2d& pixel, double& pitch) const;
+  bool triangle(const Vec& b,int level,Triangle& result) const;
+  int levels() const { return int(masses_.size()); }
+  const cv::Mat& mass(int level) const { return masses_.at(level); }
+  double supportRadius(int level,const cv::Point& pixel) const;
+  cv::Rect supportBox(int level,const cv::Point& pixel) const;
  private:
   struct Seed { Eigen::Vector3f b; int pixel; };
   struct Node { int seed, left = -1, right = -1, axis = 0; };
@@ -51,27 +65,26 @@ class RayAtlas {
   void nearest(int node, const Vec& b, int& best, double& distance) const;
   CameraModel model_;
   bool locateCell(const Vec& b,int x,int y,Eigen::Vector2d& pixel) const;
+  bool triangleCell(const Vec& b,int x,int y,int level,Triangle& result) const;
   int width_, height_, root_ = -1;
   std::vector<Eigen::Vector3f> rays_;
   std::vector<float> areas_;
   std::vector<Seed> seeds_;
   std::vector<Node> nodes_;
+  std::vector<cv::Mat> masses_, radii_;
 };
 
 struct Sample {
   double value = 0;
-  Vec gradient = Vec::Zero(); // Riemannian gradient on the unit sphere.
-  std::vector<std::pair<int, double>> weights;
+  Vec gradient = Vec::Zero(); // derivative of the same interpolant on S2
 };
 
-// Prepared once per sample/linearization, not eigen-decomposed per iteration.
-struct SamplingKernel {
-  Mat matrix = Mat::Identity();
-  double radius = 0; // maximum Euclidean radius of the 3-D kernel support
-  static SamplingKernel fromMatrix(const Mat& matrix);
+// Frozen during each level's IEKF iterations. Blend adjacent prefiltered levels.
+struct SamplingFilter {
+  int level = 0;
+  double blend = 0;
 };
 
-// All quantities in the image camera frame. Used only for support validation.
 struct PlaneSupport {
   Vec normal, center;
   double height = 0, radius = 0;
@@ -81,27 +94,20 @@ struct PlaneSupport {
 
 class Image {
  public:
-  Image(std::shared_ptr<const RayAtlas> atlas, const cv::Mat& gray, bool estimate_noise = true);
-  std::shared_ptr<Image> crop(const cv::Rect& roi) const;
-  // precision is frozen for a linearization. The compact Wendland kernel has
-  // zero value and derivative at its boundary; changing support is continuous.
-  bool sample(const Vec& b, const Mat& precision, Sample& result) const;
-  bool sample(const Vec& b, const SamplingKernel& kernel, Sample& result,
-              bool gradient = true, const PlaneSupport* support = nullptr) const;
+  Image(std::shared_ptr<const RayAtlas> atlas, const cv::Mat& gray);
   bool locate(const Vec& b, Eigen::Vector2d& pixel, double& pitch) const;
+  // Select a conservative sensor-pyramid bandwidth from angular covariance.
+  // Also check all intensity-independent support conditions before sampling.
+  bool prepare(const Vec& b,const Mat& covariance,SamplingFilter& filter,
+               double& cover,const PlaneSupport* support = nullptr) const;
+  bool sample(const Vec& b,const SamplingFilter& filter,Sample& result,
+              bool gradient = true,const PlaneSupport* support = nullptr) const;
   const RayAtlas& atlas() const { return *atlas_; }
-  double noise() const { return noise_; }
-  cv::Rect bounds() const { return bounds_; }
  private:
-  bool sampleImpl(const Vec& b, const SamplingKernel& kernel, Sample& result,
-                  bool gradient, bool weights, const PlaneSupport* support) const;
-  Image() = default;
+  struct Level { cv::Mat values, valid; };
+  bool inspect(const Vec& b,int level,Triangle& triangle,double& cover,
+               const PlaneSupport* support) const;
   std::shared_ptr<const RayAtlas> atlas_;
-  cv::Mat gray_;
-  cv::Rect bounds_;
-  double noise_ = 1.0 / 255.0;
+  std::vector<Level> levels_;
 };
-
-double weightOverlap(const Sample& a, const Sample& b);
-Mat precision(const Vec& b, const Eigen::Matrix2d& footprint);
 } // namespace spherical

@@ -25,7 +25,8 @@ struct SphericalWarp
 {
   std::vector<V3D> world, bearings;
   std::vector<double> reference_radii;
-  std::vector<spherical::SamplingKernel> kernels;
+  std::vector<M3D> covariance;
+  std::vector<spherical::SamplingFilter> reference_filters, current_filters;
   std::vector<spherical::Sample> current;
   M3D pose_R = M3D::Identity();
   V3D pose_t = V3D::Zero();
@@ -164,6 +165,7 @@ public:
   bool refreshPlane(VisualPoint& pt);
   bool buildSphericalReference(Feature& feature);
   bool prepareSphericalGeometry(const Feature& feature,int level,SphericalWarp& warp) const;
+  bool configureSphericalSampling(const Feature& feature,SphericalWarp& warp) const;
   bool sampleSphericalWarp(const Feature& feature,SphericalWarp& warp) const;
   bool prepareSphericalWarp(const Feature& feature,int level,SphericalWarp& warp) const;
   bool prepareSphericalPyramid(const Feature& feature,std::vector<SphericalWarp>& warps) const;

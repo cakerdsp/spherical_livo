@@ -15,6 +15,7 @@ which is included as part of this source code package.
 #include <omp.h>
 #include <exception>
 #include <algorithm>
+#include <cmath>
 
 namespace {
 // cake_slam pattern: independent slots, exception capture inside OpenMP,
@@ -38,13 +39,12 @@ void scaleWarpGeometry(const SphericalWarp& source,int level_delta,SphericalWarp
 {
   const double scale=std::ldexp(1.0,level_delta);
   target.world=source.world;target.bearings=source.bearings;
-  target.reference_radii=source.reference_radii;target.kernels=source.kernels;
+  target.reference_radii=source.reference_radii;target.covariance=source.covariance;
   for(double& radius:target.reference_radii) radius*=scale;
-  for(auto& kernel:target.kernels) { kernel.radius*=scale;kernel.matrix/=scale*scale; }
+  for(auto& covariance:target.covariance) covariance*=scale*scale;
   target.pose_R=source.pose_R;target.pose_t=source.pose_t;
-  // Conservative envelope inherited from the validated coarse level. This
-  // helper is only used for finer levels, whose supports are subsets.
-  target.cover=source.cover;target.geometry_ready=source.geometry_ready;target.ready=false;
+  // Sensor-pyramid footprints are configured separately at every scale.
+  target.cover=0;target.geometry_ready=false;target.ready=false;
 }
 int depthCell(double coordinate) {
   return std::max(0,std::min(20,int(std::floor((coordinate+1.0)*10.0))));
@@ -482,7 +482,7 @@ void VIOManager::updateState(cv::Mat img, int level)
         if(range<1e-6) { result.invalid=true;break; }
         const spherical::Sample* sample=&warp.current[k];
         if(iteration!=0) {
-          if(!sphere_image->sample(pc/range,warp.kernels[k],sampled)) { result.invalid=true;break; }
+          if(!sphere_image->sample(pc/range,warp.current_filters[k],sampled)) { result.invalid=true;break; }
           sample=&sampled;
         }
         const double cur_value=255*sample->value;
@@ -654,7 +654,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
   if (img.channels() == 3) cv::cvtColor(img, img, CV_BGR2GRAY);
 
-  sphere_image=std::make_shared<spherical::Image>(cameras_[active_camera].camera->atlas,img,false);
+  sphere_image=std::make_shared<spherical::Image>(cameras_[active_camera].camera->atlas,img);
   new_frame_.reset(new Frame(cam, img));
   updateFrameState(*state);
   
@@ -822,16 +822,9 @@ bool VIOManager::buildSphericalReference(Feature& feature)
     feature.rays.push_back(b);feature.ray_pitch.push_back(pitch);
     feature.ray_basis.push_back(spherical::tangentBasis(b));
   }
-  // Check the complete coarsest footprint before retaining a reference.
-  SphericalWarp coarse;
-  if(!prepareSphericalWarp(feature,patch_pyrimid_level-1,coarse)) return false;
-  if(patch_pyrimid_level==1) {
-    std::copy(coarse.reference.begin(),coarse.reference.end(),feature.patch_);
-  } else {
-    SphericalWarp fine;scaleWarpGeometry(coarse,1-patch_pyrimid_level,fine);
-    if(!sampleSphericalWarp(feature,fine)) return false;
-    std::copy(fine.reference.begin(),fine.reference.end(),feature.patch_);
-  }
+  std::vector<SphericalWarp> warps;
+  if(!prepareSphericalPyramid(feature,warps)) return false;
+  std::copy(warps[0].reference.begin(),warps[0].reference.end(),feature.patch_);
   return true;
 }
 
@@ -841,7 +834,7 @@ bool VIOManager::prepareSphericalGeometry(const Feature& feature,int level,Spher
   warp.ready=false;warp.geometry_ready=false;warp.cover=0;
   const auto& pt=*feature.point_;
   if(!feature.sphere_image || feature.rays.size()!=size_t(sample_count) || feature.ray_pitch.size()!=feature.rays.size() || feature.ray_basis.size()!=feature.rays.size()) return false;
-  warp.world.resize(sample_count);warp.kernels.resize(sample_count);
+  warp.world.resize(sample_count);warp.covariance.resize(sample_count);
   warp.bearings.resize(sample_count);warp.reference_radii.resize(sample_count);
   const M3D Rrw=feature.T_f_w_.rotationMatrix();
   const V3D trw=feature.T_f_w_.translation();
@@ -849,7 +842,6 @@ bool VIOManager::prepareSphericalGeometry(const Feature& feature,int level,Spher
   const double height=nr.dot(ref_center);
   const M3D Rcr=Rcw*Rrw.transpose();
   const V3D nc=Rcw*pt.normal_;
-  const V3D center_bearing=(Rcw*pt.pos_+Pcw).normalized();
   for(int k=0;k<sample_count;++k) {
     const V3D& br=feature.rays[k];V3D pr;
     if(!intersectPlane(br,nr,height,pr)) return false;
@@ -874,38 +866,55 @@ bool VIOManager::prepareSphericalGeometry(const Feature& feature,int level,Spher
     const double minimum=std::abs(determinant)/std::sqrt(maximum);
     if(!(minimum>1e-6)) return false;
     const double radius=(1<<level)*std::max({2.5*rp,2.5*cp/minimum,patch_radius/std::sqrt(double(sample_count))});
-    // Radial precision uses the largest ellipse axis, as in precision().
+    // Match the local second moment of the old 2-D Wendland footprint:
+    // covariance per tangent axis is (5/72)*radius^2. The sampler then uses
+    // the conservative major sensor-pixel axis to select prefiltered levels.
     const double bound=radius*std::sqrt(maximum);
-    const SamplingKernel ac{basis*metric.inverse()*basis.transpose()/(radius*radius)+
-                           bc*bc.transpose()/(bound*bound),bound};
-    // These are sampler validity bounds, now checked without touching pixels.
-    if(!(radius>0 && radius<=0.3 && bound>0 && bound<=0.3) || !ac.matrix.allFinite()) return false;
-    warp.world[k]=world;warp.kernels[k]=ac;
+    if(!(radius>0 && radius<=0.3 && bound>0 && bound<=0.3)) return false;
+    warp.world[k]=world;
+    warp.covariance[k]=(5.0/72.0)*radius*radius*basis*metric*basis.transpose();
     warp.bearings[k]=bc;warp.reference_radii[k]=radius;
-    warp.cover=std::max(warp.cover,(bc-center_bearing).norm()+bound);
   }
-  warp.pose_R=Rcw;warp.pose_t=Pcw;warp.geometry_ready=true;
-  return true;
+  warp.pose_R=Rcw;warp.pose_t=Pcw;
+  return configureSphericalSampling(feature,warp);
 }
 
-bool VIOManager::sampleSphericalWarp(const Feature& feature,SphericalWarp& warp) const
+bool VIOManager::configureSphericalSampling(const Feature& feature,SphericalWarp& warp) const
 {
   using namespace spherical;
-  warp.ready=false;
-  if(!warp.geometry_ready) return false;
+  warp.geometry_ready=false;warp.ready=false;warp.cover=0;
   const auto& pt=*feature.point_;
   const M3D Rrw=feature.T_f_w_.rotationMatrix();
   const V3D ref_center=feature.T_f_w_*pt.plane_center,nr=Rrw*pt.normal_;
   const V3D cur_center=Rcw*pt.plane_center+Pcw,nc=Rcw*pt.normal_;
   const PlaneSupport ref_support{nr,ref_center,nr.dot(ref_center),3*pt.plane_radius};
   const PlaneSupport cur_support{nc,cur_center,nc.dot(cur_center),3*pt.plane_radius};
-  warp.reference.resize(sample_count);warp.current.resize(sample_count);
-  Sample reference;
+  const V3D center=(Rcw*pt.pos_+Pcw).normalized();
+  warp.reference_filters.resize(sample_count);warp.current_filters.resize(sample_count);
   for(int k=0;k<sample_count;++k) {
     const double radius=warp.reference_radii[k];
-    const SamplingKernel ar{M3D::Identity()/(radius*radius),radius};
-    if(!feature.sphere_image->sample(feature.rays[k],ar,reference,false,&ref_support) ||
-       !sphere_image->sample(warp.bearings[k],warp.kernels[k],warp.current[k],true,&cur_support)) return false;
+    const auto& basis=feature.ray_basis[k];
+    const Mat covariance=(5.0/72.0)*radius*radius*basis*basis.transpose();
+    double ref_cover,cur_cover;
+    if(!feature.sphere_image->prepare(feature.rays[k],covariance,warp.reference_filters[k],ref_cover,&ref_support) ||
+       !sphere_image->prepare(warp.bearings[k],warp.covariance[k],warp.current_filters[k],cur_cover,&cur_support)) return false;
+    warp.cover=std::max(warp.cover,(warp.bearings[k]-center).norm()+cur_cover);
+  }
+  warp.geometry_ready=true;
+  return true;
+}
+
+bool VIOManager::sampleSphericalWarp(const Feature& feature,SphericalWarp& warp) const
+{
+  warp.ready=false;
+  if(!warp.geometry_ready) return false;
+  warp.reference.resize(sample_count);warp.current.resize(sample_count);
+  spherical::Sample reference;
+  for(int k=0;k<sample_count;++k) {
+    // Geometry already validated complete prefilter supports; intensity access
+    // now needs only 3 vertices per level (6 for a fractional scale).
+    if(!feature.sphere_image->sample(feature.rays[k],warp.reference_filters[k],reference,false) ||
+       !sphere_image->sample(warp.bearings[k],warp.current_filters[k],warp.current[k])) return false;
     warp.reference[k]=float(255*reference.value);
   }
   warp.ready=true;
@@ -923,11 +932,17 @@ bool VIOManager::prepareSphericalPyramid(const Feature& feature,std::vector<Sphe
   warps.resize(patch_pyrimid_level);
   const int coarse=patch_pyrimid_level-1;
   auto& base=warps[coarse];
-  // No intensity sampling until the entire coarse geometry/depth passes.
-  if(!prepareSphericalGeometry(feature,coarse,base) || !depthConsistent(*feature.point_,base)) return false;
-  for(int level=coarse-1;level>=0;--level) scaleWarpGeometry(base,level-coarse,warps[level]);
-  // The coarse depth envelope includes every finer level. The same depth
-  // observations/3-sigma test need not be repeated for its subsets.
+  if(!prepareSphericalGeometry(feature,coarse,base)) return false;
+  double cover=base.cover;
+  for(int level=coarse-1;level>=0;--level) {
+    scaleWarpGeometry(base,level-coarse,warps[level]);
+    if(!configureSphericalSampling(feature,warps[level])) return false;
+    cover=std::max(cover,warps[level].cover);
+  }
+  // Actual triangle/prefilter supports can change with pyramid level. Inspect
+  // their union envelope, rather than assuming the old kernel nesting rule.
+  base.cover=cover;
+  if(!depthConsistent(*feature.point_,base)) return false;
   for(int level=coarse;level>=0;--level)
     if(!sampleSphericalWarp(feature,warps[level])) return false;
   return true;

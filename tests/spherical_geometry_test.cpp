@@ -33,26 +33,58 @@ TEST(SphericalGeometry,BearingDerivativeMatchesRightPerturbedState){
   }
 }
 
-TEST(SphericalGeometry,KernelGradientIncludesNormalizedWeights){
-  auto atlas=std::make_shared<RayAtlas>(pinhole());cv::Mat raw(128,160,CV_8UC1);
+TEST(SphericalGeometry,TriangleGradientMatchesItsFrozenScaleInterpolant){
+  auto model=pinhole();auto atlas=std::make_shared<RayAtlas>(model);cv::Mat raw(128,160,CV_8UC1);
   for(int y=0;y<raw.rows;++y)for(int x=0;x<raw.cols;++x)raw.at<uchar>(y,x)=40+(3*x+2*y)%150;
-  Image image(atlas,raw);const Vec b=Vec(0.04,-0.03,1).normalized();
-  const Mat a=Mat::Identity()/(0.04*0.04);Sample base;ASSERT_TRUE(image.sample(b,a,base));
+  Image image(atlas,raw);const Vec b=model.ray(83.17,59.39);
   const Basis e=tangentBasis(b);const double eps=1e-6;
-  for(int k=0;k<2;++k){Sample plus,minus;
-    ASSERT_TRUE(image.sample((b+eps*e.col(k)).normalized(),a,plus));
-    ASSERT_TRUE(image.sample((b-eps*e.col(k)).normalized(),a,minus));
-    EXPECT_NEAR((plus.value-minus.value)/(2*eps),base.gradient.dot(e.col(k)),1e-4);
+  for(const SamplingFilter filter:{SamplingFilter{0,0},SamplingFilter{1,0.35}}) {
+    Sample base;ASSERT_TRUE(image.sample(b,filter,base));
+    for(int k=0;k<2;++k){Sample plus,minus;
+      ASSERT_TRUE(image.sample((b+eps*e.col(k)).normalized(),filter,plus));
+      ASSERT_TRUE(image.sample((b-eps*e.col(k)).normalized(),filter,minus));
+      EXPECT_NEAR((plus.value-minus.value)/(2*eps),base.gradient.dot(e.col(k)),1e-5);
+    }
+    EXPECT_NEAR(base.gradient.dot(b),0,1e-10);
   }
-  EXPECT_NEAR(base.gradient.dot(b),0,1e-10);
-  EXPECT_GT(weightOverlap(base,base),0);
-  EXPECT_LE(weightOverlap(base,base),1);
 }
 
-TEST(SphericalGeometry,ClippedNativePixelInvalidatesItsWholeSupport){
+TEST(SphericalGeometry,ClippingPropagatesThroughPrefilterSupport){
   auto atlas=std::make_shared<RayAtlas>(pinhole());cv::Mat raw(128,160,CV_8UC1,cv::Scalar(100));
-  raw.at<uchar>(64,80)=255;Image image(atlas,raw);Sample sample;
-  EXPECT_FALSE(image.sample(atlas->ray(80,64).normalized(),Mat::Identity()/0.001,sample));
+  const Vec b=(0.4*atlas->ray(80,64)+0.3*atlas->ray(81,64)+0.3*atlas->ray(81,65)).normalized();
+  // Outside the native triangle, but inside the next level's filter footprint.
+  raw.at<uchar>(63,78)=255;Image image(atlas,raw);Sample sample;
+  EXPECT_TRUE(image.sample(b,SamplingFilter{0,0},sample));
+  EXPECT_FALSE(image.sample(b,SamplingFilter{1,0},sample));
+}
+
+TEST(SphericalGeometry,SharedTriangleEdgeIsContinuous){
+  auto atlas=std::make_shared<RayAtlas>(pinhole());cv::Mat raw(128,160,CV_8UC1);
+  for(int y=0;y<128;++y)for(int x=0;x<160;++x)raw.at<uchar>(y,x)=40+(3*x+2*y)%150;
+  Image image(atlas,raw);
+  const Vec a=atlas->ray(80,60),c=atlas->ray(81,61);
+  const Vec edge=(0.37*a+0.63*c).normalized(),normal=a.cross(c).normalized();
+  Sample minus,plus,center;
+  ASSERT_TRUE(image.sample(edge,SamplingFilter{},center));
+  ASSERT_TRUE(image.sample((edge-1e-8*normal).normalized(),SamplingFilter{},minus));
+  ASSERT_TRUE(image.sample((edge+1e-8*normal).normalized(),SamplingFilter{},plus));
+  EXPECT_NEAR(plus.value,minus.value,1e-5);
+  const double expected=(0.37*raw.at<uchar>(60,80)+0.63*raw.at<uchar>(61,81))/255.0;
+  EXPECT_NEAR(center.value,expected,1e-7);
+}
+
+TEST(SphericalGeometry,PrefilterPreservesConstantBrightnessAndSuppressesCheckerboard){
+  auto model=pinhole();auto atlas=std::make_shared<RayAtlas>(model);
+  cv::Mat constant(128,160,CV_8UC1,cv::Scalar(130)),checker(128,160,CV_8UC1);
+  for(int y=0;y<128;++y)for(int x=0;x<160;++x)checker.at<uchar>(y,x)=(x+y)%2?80:180;
+  Image flat(atlas,constant),alternating(atlas,checker);
+  const Vec b=atlas->ray(80,60).normalized();Sample smooth,original;
+  ASSERT_TRUE(flat.sample(b,SamplingFilter{2,0.4},smooth));
+  EXPECT_NEAR(smooth.value,130.0/255,1e-6);EXPECT_LT(smooth.gradient.norm(),1e-4);
+  ASSERT_TRUE(alternating.sample(b,SamplingFilter{},original));
+  ASSERT_TRUE(alternating.sample(b,SamplingFilter{2,0},smooth));
+  EXPECT_GT(std::abs(original.value-130.0/255),0.1);
+  EXPECT_NEAR(smooth.value,130.0/255,0.005);
 }
 
 TEST(SphericalGeometry,LookupUsesFullCameraSphereNotPositiveZGate){
@@ -90,25 +122,26 @@ TEST(SphericalGeometry,NativeProjectionSeedsStillRequireSphericalContainment){
   }
 }
 
-TEST(SphericalGeometry,FastKernelChecksTheSameFinitePlanePixels){
-  auto atlas=std::make_shared<RayAtlas>(pinhole());cv::Mat raw(128,160,CV_8UC1);
-  for(int y=0;y<128;++y) for(int x=0;x<160;++x) raw.at<uchar>(y,x)=40+(3*x+2*y)%150;
-  Image image(atlas,raw);const Vec b=Vec(0.03,-0.02,1).normalized();
-  const Mat a=precision(b,(Eigen::Vector2d(0.04*0.04,0.025*0.025)).asDiagonal());
-  const auto kernel=SamplingKernel::fromMatrix(a);
-  Sample full;ASSERT_TRUE(image.sample(b,a,full));
-  const Vec normal=Vec(0.2,-0.1,1).normalized();const double height=4;
+TEST(SphericalGeometry,FinitePlaneIncludesAllPrefilterContributors){
+  auto model=pinhole();auto atlas=std::make_shared<RayAtlas>(model);
+  cv::Mat raw(128,160,CV_8UC1,cv::Scalar(100));Image image(atlas,raw);
+  const Vec b=model.ray(80.3,64.2),normal=Vec::UnitZ();const double height=4;
   const Vec center=b*(height/normal.dot(b));
-  for(double radius:{0.02,0.12,2.0}) {
-    bool expected=true;
-    for(const auto& weight:full.weights) {
-      const Vec ray=atlas->ray(weight.first%160,weight.first/160);
-      const Vec surface=ray*(height/normal.dot(ray));
-      if((surface-center).norm()>radius) expected=false;
-    }
-    PlaneSupport support{normal,center,height,radius};Sample fast;
-    EXPECT_EQ(image.sample(b,kernel,fast,true,&support),expected);
-    if(expected) { EXPECT_NEAR(full.value,fast.value,1e-12);EXPECT_LT((full.gradient-fast.gradient).norm(),1e-10); }
-    EXPECT_TRUE(fast.weights.empty());
-  }
+  Sample sample;
+  PlaneSupport large{normal,center,height,3.0},small{normal,center,height,0.05};
+  EXPECT_TRUE(image.sample(b,SamplingFilter{2,0},sample,true,&large));
+  EXPECT_FALSE(image.sample(b,SamplingFilter{2,0},sample,true,&small));
+  SamplingFilter filter;double cover;
+  const Basis basis=tangentBasis(b);
+  ASSERT_TRUE(image.prepare(b,0.0001*basis*basis.transpose(),filter,cover,&large));
+  EXPECT_GT(cover,0);EXPECT_GE(filter.level,0);
+  EXPECT_TRUE(image.sample(b,filter,sample,true,&large));
+}
+
+TEST(SphericalGeometry,TriangleSamplingSupportsDirectionsBehindTheCameraPlane){
+  auto model=pinhole();model.type=CameraModel::Type::KannalaBrandt;model.fx=model.fy=45;
+  auto atlas=std::make_shared<RayAtlas>(model);cv::Mat raw(128,160,CV_8UC1,cv::Scalar(100));
+  Image image(atlas,raw);Sample sample;const Vec b=model.ray(155,64);
+  ASSERT_LT(b.z(),0);ASSERT_TRUE(image.sample(b,SamplingFilter{},sample));
+  EXPECT_NEAR(sample.value,100.0/255,1e-6);
 }
